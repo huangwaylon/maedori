@@ -1,4 +1,4 @@
-// 前撮り メモ — photos with notes.
+// 前撮り メモ — reference clips (one per scene of the sample video) with notes.
 // View mode (default) is read-only. Edit mode: write notes, drag rows by the grip to reorder
 // (also between sections), or focus the grip and use ↑/↓.
 // Shared by everyone through textdb.online (no account) as { notes, order }, cached in localStorage.
@@ -11,14 +11,16 @@
   const POLL_MS = 15000;
   const SAVE_DELAY_MS = 800;
   const EDGE_PX = 100; // auto-scroll when dragging this close to the top/bottom
-  const SECTIONS = Object.keys(window.PHOTOS);
+  const SECTIONS = Object.keys(window.SECTIONS);
+  const CLIPS = window.CLIPS; // id -> { start, end, w, h }
+  const LEGACY = window.LEGACY || {}; // old screenshot id -> clip id
   const GRIP_SVG =
     '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 6h14M3 10h14M3 14h14" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
 
   const main = document.getElementById("sections");
   const statusEl = document.getElementById("status");
   const modeBtn = document.getElementById("mode");
-  const cards = {}; // photo id ("folder/file") -> card element
+  const cards = {}; // clip id ("s01") -> card element
   const lists = {}; // section -> list element
   const counts = {}; // section -> count element
   const unsynced = {}; // photo id -> note typed here but not saved yet
@@ -45,23 +47,25 @@
   // Turn untrusted data into { notes: {id: text}, order: {section: [ids]} } covering every photo once
   function clean(raw) {
     const src = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
-    const known = new Set(SECTIONS.flatMap((s) => window.PHOTOS[s].map((f) => `${s}/${f}`)));
+    const known = new Set(Object.keys(CLIPS));
+    const toClip = (id) => (known.has(id) ? id : LEGACY[id]); // screenshots were replaced by clips
     const notes = {};
+    const addNote = (id, note) => {
+      const clip = toClip(id);
+      if (clip && typeof note === "string" && note.trim() && !notes[clip]) notes[clip] = note;
+    };
+    if (src.notes && typeof src.notes === "object") for (const [id, note] of Object.entries(src.notes)) addNote(id, note);
     // the first version stored notes flat at the top level ({ id: note }); keep reading those
-    for (const [id, note] of Object.entries(src)) if (known.has(id) && typeof note === "string" && note.trim()) notes[id] = note;
-    if (src.notes && typeof src.notes === "object") {
-      for (const [id, note] of Object.entries(src.notes)) if (typeof note === "string" && note.trim()) notes[id] = note;
-    }
+    for (const [id, note] of Object.entries(src)) addNote(id, note);
     const seen = new Set();
     const order = {};
     for (const section of SECTIONS) {
       const ids = Array.isArray(src.order?.[section]) ? src.order[section] : [];
-      order[section] = ids.filter((id) => known.has(id) && !seen.has(id) && seen.add(id));
+      order[section] = ids.map(toClip).filter((id) => id && !seen.has(id) && seen.add(id));
     }
     for (const section of SECTIONS) {
-      for (const file of window.PHOTOS[section]) {
-        const id = `${section}/${file}`;
-        if (!seen.has(id)) order[section].push(id); // new photos land at the end of their own folder
+      for (const id of window.SECTIONS[section]) {
+        if (!seen.has(id)) order[section].push(id); // new clips land in their default section
       }
     }
     return { notes, order };
@@ -75,22 +79,28 @@
   }
 
   // ---- Render ----
+  const fmt = (t) => `${Math.floor(t / 60)}:${(t % 60).toFixed(1).padStart(4, "0")}`;
+
   function makeCard(id) {
-    const [folder, file] = id.split("/");
-    const src = `${encodeURIComponent(folder)}/${encodeURIComponent(file)}`;
+    const clip = CLIPS[id];
     const card = document.createElement("article");
     card.className = "card";
     card.dataset.id = id;
     card.innerHTML =
-      `<a class="photo" target="_blank" rel="noopener"><img loading="lazy" decoding="async" alt=""></a>` +
+      `<div class="photo"><video muted loop playsinline preload="none"></video><img class="thumb" alt="" loading="lazy" decoding="async"></div>` +
       `<div class="caption"><span class="num"></span><p class="note"></p>` +
-      `<textarea rows="1" placeholder="メモを追加" aria-label="メモ"></textarea></div>` +
+      `<textarea rows="1" placeholder="メモを追加" aria-label="メモ"></textarea>` +
+      `<span class="time"></span></div>` +
       `<button class="grip" type="button" aria-label="並べ替え（ドラッグ、または↑↓キー）">${GRIP_SVG}</button>`;
-    card.querySelector(".photo").href = src;
-    const img = card.querySelector("img");
-    img.alt = file;
-    img.addEventListener("load", () => cropBorders(img), { once: true });
-    img.src = src;
+    const video = card.querySelector("video");
+    video.poster = `clips/${id}.jpg`;
+    video.src = `clips/${id}.mp4`;
+    video.style.aspectRatio = `${clip.w} / ${clip.h}`;
+    video.setAttribute("aria-label", `${fmt(clip.start)}–${fmt(clip.end)}`);
+    video.addEventListener("click", () => (video.paused ? video.play() : video.pause()));
+    card.querySelector(".thumb").src = `clips/${id}.jpg`;
+    card.querySelector(".time").textContent = `元動画 ${fmt(clip.start)}–${fmt(clip.end)}`;
+    watch(video);
 
     const box = card.querySelector("textarea");
     box.addEventListener("input", () => {
@@ -120,40 +130,29 @@
     return card;
   }
 
-  // The photos are screenshots of videos with black bars; swap in a copy with the bars cut off
-  function cropBorders(img) {
-    const W = img.naturalWidth, H = img.naturalHeight;
-    const sw = 240, sh = Math.round((sw * H) / W); // scan a small copy
-    const scan = document.createElement("canvas");
-    scan.width = sw;
-    scan.height = sh;
-    const sctx = scan.getContext("2d", { willReadFrequently: true });
-    sctx.drawImage(img, 0, 0, sw, sh);
-    const px = sctx.getImageData(0, 0, sw, sh).data;
-    const lit = (x, y) => {
-      const i = (y * sw + x) * 4;
-      return Math.max(px[i], px[i + 1], px[i + 2]) > 40;
-    };
-    const rowLit = (y) => { let n = 0; for (let x = 0; x < sw; x++) n += lit(x, y); return n > sw * 0.05; };
-    const colLit = (x) => { let n = 0; for (let y = 0; y < sh; y++) n += lit(x, y); return n > sh * 0.05; };
-    let top = 0, bottom = sh - 1, left = 0, right = sw - 1;
-    while (top < bottom && !rowLit(top)) top++;
-    while (bottom > top && !rowLit(bottom)) bottom--;
-    while (left < right && !colLit(left)) left++;
-    while (right > left && !colLit(right)) right--;
-    const k = W / sw;
-    const x = Math.floor(left * k), y = Math.floor(top * k);
-    const w = Math.ceil((right - left + 1) * k), h = Math.ceil((bottom - top + 1) * k);
-    if (w < W * 0.2 || h < H * 0.2 || (w > W * 0.97 && h > H * 0.97)) return; // nothing sensible to crop
-    const out = document.createElement("canvas");
-    out.width = w;
-    out.height = h;
-    out.getContext("2d").drawImage(img, x, y, w, h, 0, 0, w, h);
-    out.toBlob((blob) => {
-      if (!blob) return;
-      img.src = URL.createObjectURL(blob);
-      img.classList.add("cropped");
-    }, "image/jpeg", 0.9);
+  // Play clips only while they are on screen (and only in view mode)
+  const visible = new Set();
+  const observer = new IntersectionObserver(
+    (entries) => {
+      for (const e of entries) {
+        if (e.isIntersecting) visible.add(e.target);
+        else {
+          visible.delete(e.target);
+          e.target.pause();
+        }
+      }
+      syncPlayback();
+    },
+    { threshold: 0.6 }
+  );
+  function watch(video) {
+    observer.observe(video);
+  }
+  function syncPlayback() {
+    for (const v of visible) {
+      if (editing || drag) v.pause();
+      else if (v.paused) v.play().catch(() => {}); // autoplay can be refused (e.g. Low Power Mode); tap plays
+    }
   }
 
   for (const section of SECTIONS) {
@@ -228,6 +227,7 @@
     document.body.classList.toggle("editing", on);
     modeBtn.textContent = on ? "完了" : "編集";
     modeBtn.setAttribute("aria-pressed", String(on));
+    syncPlayback();
     if (on) {
       for (const card of Object.values(cards)) grow(card.querySelector("textarea"));
     } else {
