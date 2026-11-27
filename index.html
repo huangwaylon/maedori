@@ -3,19 +3,24 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#b3282d">
+  <meta name="theme-color" content="#f6f2ec" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#171412" media="(prefers-color-scheme: dark)">
   <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="前撮り">
   <title>前撮り メモ</title>
-  <link rel="stylesheet" href="style.css">
+  <!-- bump ?v= on every deploy so phones never mix old and new files -->
+  <link rel="stylesheet" href="style.css?v=3">
 </head>
 <body>
-  <header>
-    <h1>前撮り メモ</h1>
-    <button id="mode" type="button">編集</button>
+  <header class="bar">
+    <div class="titles">
+      <h1>前撮り メモ</h1>
+      <p id="status" aria-live="polite"></p>
+    </div>
+    <button id="mode" type="button" aria-pressed="false">編集</button>
   </header>
-  <p id="status" aria-live="polite"></p>
   <main id="sections"></main>
-  <script src="photos.js"></script>
-  <script src="app.js"></script>
+  <script src="photos.js?v=3"></script>
+  <script src="app.js?v=3"></script>
 </body>
 </html>

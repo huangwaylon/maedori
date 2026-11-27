@@ -1,5 +1,6 @@
-// 前撮り メモ — photos with notes. View mode (default) is read-only; edit mode lets you
-// write notes and drag rows by their ≡ handle to reorder (also across sections).
+// 前撮り メモ — photos with notes.
+// View mode (default) is read-only. Edit mode: write notes, drag rows by the grip to reorder
+// (also between sections), or focus the grip and use ↑/↓.
 // Shared by everyone through textdb.online (no account) as { notes, order }, cached in localStorage.
 "use strict";
 
@@ -9,22 +10,26 @@
   const STORAGE_KEY = "maedori:data";
   const POLL_MS = 15000;
   const SAVE_DELAY_MS = 800;
-  const EDGE_PX = 90; // auto-scroll when dragging this close to the top/bottom
+  const EDGE_PX = 100; // auto-scroll when dragging this close to the top/bottom
   const SECTIONS = Object.keys(window.PHOTOS);
+  const GRIP_SVG =
+    '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 6h14M3 10h14M3 14h14" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
 
   const main = document.getElementById("sections");
-  const status = document.getElementById("status");
+  const statusEl = document.getElementById("status");
   const modeBtn = document.getElementById("mode");
   const cards = {}; // photo id ("folder/file") -> card element
   const lists = {}; // section -> list element
+  const counts = {}; // section -> count element
   const unsynced = {}; // photo id -> note typed here but not saved yet
   let orderDirty = false; // local order changed but not saved yet
   let data = clean(loadLocal());
   let editing = false;
   let drag = null;
   let writing = Promise.resolve();
-  let saveTimer;
+  let saveTimer, statusTimer;
 
+  // ---- Data ----
   function loadLocal() {
     try {
       return JSON.parse(localStorage.getItem(STORAGE_KEY));
@@ -60,37 +65,56 @@
     return { notes, order };
   }
 
-  function setStatus(text) {
-    status.textContent = text;
+  function setStatus(text, { warn = false, fade = false } = {}) {
+    clearTimeout(statusTimer);
+    statusEl.textContent = text;
+    statusEl.classList.toggle("warn", warn);
+    if (fade) statusTimer = setTimeout(() => (statusEl.textContent = ""), 2000);
   }
 
   // ---- Render ----
   function makeCard(id) {
     const [folder, file] = id.split("/");
     const src = `${encodeURIComponent(folder)}/${encodeURIComponent(file)}`;
-    const card = document.createElement("div");
+    const card = document.createElement("article");
     card.className = "card";
     card.dataset.id = id;
     card.innerHTML =
-      `<div class="handle" aria-label="ドラッグで並べ替え">≡</div>` +
-      `<a class="photo" target="_blank" rel="noopener"><img loading="lazy" alt=""><span class="num"></span></a>` +
-      `<p class="note"></p>` +
-      `<textarea rows="2" placeholder="メモ…"></textarea>`;
+      `<a class="photo" target="_blank" rel="noopener"><img loading="lazy" decoding="async" alt=""></a>` +
+      `<div class="caption"><span class="num"></span><p class="note"></p>` +
+      `<textarea rows="1" placeholder="メモを追加" aria-label="メモ"></textarea></div>` +
+      `<button class="grip" type="button" aria-label="並べ替え（ドラッグ、または↑↓キー）">${GRIP_SVG}</button>`;
     card.querySelector(".photo").href = src;
     const img = card.querySelector("img");
+    img.alt = file;
     img.addEventListener("load", () => cropBorders(img), { once: true });
     img.src = src;
+
     const box = card.querySelector("textarea");
     box.addEventListener("input", () => {
       unsynced[id] = box.value;
-      box.classList.add("dirty");
       card.querySelector(".note").textContent = box.value.trim() ? box.value : "";
       grow(box);
+      setStatus("保存中…");
       clearTimeout(saveTimer);
       saveTimer = setTimeout(flush, SAVE_DELAY_MS);
     });
     box.addEventListener("blur", flush);
-    card.querySelector(".handle").addEventListener("pointerdown", (e) => startDrag(e, card));
+
+    const grip = card.querySelector(".grip");
+    // touch: the most reliable way to drag on iPhone Safari (preventDefault stops the page scrolling)
+    grip.addEventListener("touchstart", (e) => startDrag(card, e.changedTouches[0].clientY, e, e.changedTouches[0].identifier), { passive: false });
+    // mouse / pen
+    grip.addEventListener("pointerdown", (e) => {
+      if (e.pointerType !== "touch") startDrag(card, e.clientY, e, `p${e.pointerId}`);
+    });
+    grip.addEventListener("keydown", (e) => {
+      const step = { ArrowUp: -1, ArrowDown: 1 }[e.key];
+      if (!step) return;
+      e.preventDefault();
+      moveBy(card, step);
+      grip.focus();
+    });
     return card;
   }
 
@@ -131,25 +155,30 @@
   }
 
   for (const section of SECTIONS) {
-    const h2 = document.createElement("h2");
-    h2.textContent = section;
+    const head = document.createElement("div");
+    head.className = "section-head";
+    head.innerHTML = `<h2></h2><span class="count"></span>`;
+    head.querySelector("h2").textContent = section;
+    counts[section] = head.querySelector(".count");
     const list = document.createElement("div");
     list.className = "list";
     list.dataset.section = section;
     lists[section] = list;
-    main.append(h2, list);
+    main.append(head, list);
   }
   for (const id of SECTIONS.flatMap((s) => data.order[s])) cards[id] = makeCard(id);
 
   function grow(box) {
     if (!editing) return;
     box.style.height = "auto";
-    box.style.height = `${box.scrollHeight + 2}px`;
+    box.style.height = `${box.scrollHeight}px`;
   }
 
   function renumber() {
-    for (const list of Object.values(lists)) {
-      [...list.children].forEach((card, i) => (card.querySelector(".num").textContent = `#${i + 1}`));
+    for (const section of SECTIONS) {
+      const children = [...lists[section].children];
+      children.forEach((card, i) => (card.querySelector(".num").textContent = String(i + 1).padStart(2, "0")));
+      counts[section].textContent = `${children.length}枚`;
     }
   }
 
@@ -182,38 +211,89 @@
     return order;
   }
 
+  function commitOrder() {
+    renumber();
+    data.order = domOrder();
+    orderDirty = true;
+    saveLocal();
+    setStatus("保存中…");
+    flush();
+  }
+
   // ---- Modes ----
   function setEditing(on) {
     editing = on;
     document.body.classList.toggle("editing", on);
     modeBtn.textContent = on ? "完了" : "編集";
-    if (on) for (const card of Object.values(cards)) grow(card.querySelector("textarea"));
-    else {
+    modeBtn.setAttribute("aria-pressed", String(on));
+    if (on) {
+      for (const card of Object.values(cards)) grow(card.querySelector("textarea"));
+    } else {
       document.activeElement?.blur();
       flush();
     }
   }
   modeBtn.addEventListener("click", () => setEditing(!editing));
 
-  // ---- Drag to reorder (pointer events, so it works with a finger on iPhone) ----
-  function startDrag(e, card) {
+  // ---- Reorder ----
+  // Keyboard: move one step, crossing into the neighbouring section at the ends
+  function moveBy(card, step) {
+    const list = card.parentElement;
+    const i = SECTIONS.indexOf(list.dataset.section);
+    if (step < 0) {
+      const prev = card.previousElementSibling;
+      if (prev) list.insertBefore(card, prev);
+      else if (i > 0) lists[SECTIONS[i - 1]].append(card);
+      else return;
+    } else {
+      const next = card.nextElementSibling;
+      if (next) list.insertBefore(card, next.nextElementSibling);
+      else if (i < SECTIONS.length - 1) lists[SECTIONS[i + 1]].prepend(card);
+      else return;
+    }
+    card.scrollIntoView({ block: "nearest" });
+    commitOrder();
+  }
+
+  function startDrag(card, y, e, pointer) {
     if (!editing || drag) return;
     e.preventDefault();
     document.activeElement?.blur();
-    drag = { card, pointerId: e.pointerId, y: e.clientY, before: JSON.stringify(domOrder()), raf: 0 };
+    drag = { card, pointer, y, before: JSON.stringify(domOrder()), raf: 0 };
     card.classList.add("dragging");
     document.body.classList.add("dragging");
-    // listen on window: moving the card in the DOM would drop pointer capture on the handle
-    addEventListener("pointermove", onDragMove);
-    addEventListener("pointerup", endDrag);
-    addEventListener("pointercancel", endDrag);
+    // listen on window: the card moves around the DOM while dragging
+    addEventListener("touchmove", onTouchMove, { passive: false });
+    addEventListener("touchend", onTouchEnd);
+    addEventListener("touchcancel", onTouchEnd);
+    addEventListener("pointermove", onPointerMove);
+    addEventListener("pointerup", onPointerEnd);
+    addEventListener("pointercancel", onPointerEnd);
     drag.raf = requestAnimationFrame(autoScroll);
   }
 
-  function onDragMove(e) {
-    if (e.pointerId !== drag.pointerId) return;
+  const findTouch = (e) => [...e.changedTouches].find((t) => t.identifier === drag?.pointer);
+
+  function onTouchMove(e) {
+    const t = findTouch(e);
+    if (!t) return;
+    e.preventDefault();
+    drag.y = t.clientY;
+    place();
+  }
+
+  function onTouchEnd(e) {
+    if (findTouch(e)) endDrag();
+  }
+
+  function onPointerMove(e) {
+    if (!drag || drag.pointer !== `p${e.pointerId}`) return;
     drag.y = e.clientY;
     place();
+  }
+
+  function onPointerEnd(e) {
+    if (drag && drag.pointer === `p${e.pointerId}`) endDrag();
   }
 
   // Move the dragged card to wherever the finger is now
@@ -232,8 +312,8 @@
         return !best || d < best.d ? { l, d } : best;
       }, null).l;
     }
-    const others = [...list.children].filter((c) => c !== drag.card);
-    const next = others.find((c) => {
+    const next = [...list.children].find((c) => {
+      if (c === drag.card) return false;
       const r = c.getBoundingClientRect();
       return y < r.top + r.height / 2;
     });
@@ -246,9 +326,9 @@
 
   function autoScroll() {
     if (!drag) return;
-    const speed =
-      drag.y < EDGE_PX ? -(EDGE_PX - drag.y) / 4 :
-      drag.y > innerHeight - EDGE_PX ? (drag.y - (innerHeight - EDGE_PX)) / 4 : 0;
+    const top = EDGE_PX + statusEl.getBoundingClientRect().bottom;
+    const bottom = innerHeight - EDGE_PX;
+    const speed = drag.y < top ? -(top - drag.y) / 5 : drag.y > bottom ? (drag.y - bottom) / 5 : 0;
     if (speed) {
       scrollBy(0, speed);
       place();
@@ -256,24 +336,19 @@
     drag.raf = requestAnimationFrame(autoScroll);
   }
 
-  function endDrag(e) {
-    if (!drag || e.pointerId !== drag.pointerId) return;
-    removeEventListener("pointermove", onDragMove);
-    removeEventListener("pointerup", endDrag);
-    removeEventListener("pointercancel", endDrag);
+  function endDrag() {
+    removeEventListener("touchmove", onTouchMove);
+    removeEventListener("touchend", onTouchEnd);
+    removeEventListener("touchcancel", onTouchEnd);
+    removeEventListener("pointermove", onPointerMove);
+    removeEventListener("pointerup", onPointerEnd);
+    removeEventListener("pointercancel", onPointerEnd);
     cancelAnimationFrame(drag.raf);
     drag.card.classList.remove("dragging");
     document.body.classList.remove("dragging");
-    const order = domOrder();
-    const changed = JSON.stringify(order) !== drag.before;
+    const changed = JSON.stringify(domOrder()) !== drag.before;
     drag = null;
-    renumber();
-    if (changed) {
-      data.order = order;
-      orderDirty = true;
-      saveLocal();
-      flush();
-    }
+    if (changed) commitOrder();
   }
 
   // ---- Sync ----
@@ -309,16 +384,12 @@
         body: new URLSearchParams({ key: SHARED_KEY, value: JSON.stringify(remote) }),
       });
       if (!res.ok || (await res.json()).status !== 1) throw new Error("write failed");
-      for (const [id, note] of Object.entries(batch)) {
-        if (unsynced[id] !== note) continue; // typed more meanwhile; next flush sends it
-        delete unsynced[id];
-        cards[id]?.querySelector("textarea").classList.remove("dirty");
-      }
+      for (const [id, note] of Object.entries(batch)) if (unsynced[id] === note) delete unsynced[id];
       if (sendOrder && !drag && JSON.stringify(domOrder()) === JSON.stringify(sendOrder)) orderDirty = false;
       show(remote);
-      setStatus("");
+      if (!Object.keys(unsynced).length && !orderDirty) setStatus("保存しました", { fade: true });
     } catch {
-      setStatus("オフライン：変更はこの端末に残っています。つながり次第保存します");
+      setStatus("オフライン・つながり次第保存します", { warn: true });
     }
   }
 
@@ -333,10 +404,10 @@
     if (Object.keys(unsynced).length || orderDirty) return flush(); // retry failed writes first
     try {
       const remote = await fetchRemote();
-      if (!Object.keys(unsynced).length && !orderDirty) show(remote);
-      setStatus("");
+      if (!Object.keys(unsynced).length && !orderDirty && !drag) show(remote);
+      if (statusEl.classList.contains("warn")) setStatus("");
     } catch {
-      setStatus("オフライン：最新の内容を読み込めません");
+      setStatus("オフライン・最新の内容を読み込めません", { warn: true });
     }
   }
 
