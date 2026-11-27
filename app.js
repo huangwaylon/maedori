@@ -11,7 +11,7 @@
   const POLL_MS = 15000;
   const SAVE_DELAY_MS = 800;
   const EDGE_PX = 100; // auto-scroll when dragging this close to the top/bottom
-  const ASSET_V = "7"; // keep in step with ?v= in index.html so phones fetch re-cut clips
+  const ASSET_V = "8"; // keep in step with ?v= in index.html so phones fetch re-cut clips
   const SECTIONS = Object.keys(window.SECTIONS);
   const CLIPS = window.CLIPS; // id -> { start, end, w, h }
   const LEGACY = window.LEGACY || {}; // old screenshot id -> clip id
