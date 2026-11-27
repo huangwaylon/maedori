@@ -2,15 +2,18 @@
 <html lang="ja">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#b3282d">
+  <meta name="apple-mobile-web-app-capable" content="yes">
   <title>前撮り メモ</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <header>
     <h1>前撮り メモ</h1>
-    <p id="status" aria-live="polite"></p>
+    <button id="mode" type="button">編集</button>
   </header>
+  <p id="status" aria-live="polite"></p>
   <main id="sections"></main>
   <script src="photos.js"></script>
   <script src="app.js"></script>
