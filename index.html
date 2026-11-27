@@ -9,7 +9,7 @@
   <meta name="apple-mobile-web-app-title" content="前撮り">
   <title>前撮り メモ</title>
   <!-- bump ?v= on every deploy so phones never mix old and new files -->
-  <link rel="stylesheet" href="style.css?v=9">
+  <link rel="stylesheet" href="style.css?v=10">
 </head>
 <body>
   <header class="bar">
@@ -20,7 +20,42 @@
     <button id="mode" type="button" aria-pressed="false">編集</button>
   </header>
   <main id="sections"></main>
-  <script src="clips.js?v=9"></script>
-  <script src="app.js?v=9"></script>
+
+  <!-- edit mode: add photos / videos from the phone -->
+  <button id="add" type="button" aria-label="写真・動画を追加">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+    <span>追加</span>
+  </button>
+  <input id="file" type="file" accept="image/*,video/*" multiple hidden>
+
+  <dialog id="pass-dialog">
+    <form method="dialog">
+      <h3>パスコード</h3>
+      <p class="hint">編集するにはパスコードを入力してください（この端末に保存されます）</p>
+      <input type="password" autocomplete="current-password" enterkeyhint="done" aria-label="パスコード">
+      <p class="error" aria-live="polite"></p>
+      <div class="actions">
+        <button value="cancel" formnovalidate>キャンセル</button>
+        <button value="ok" class="primary">OK</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="upload-dialog">
+    <form method="dialog">
+      <h3><span class="what"></span>を追加</h3>
+      <label>セクション
+        <select></select>
+      </label>
+      <input type="text" placeholder="新しいセクション名" maxlength="40" aria-label="新しいセクション名" hidden>
+      <div class="actions">
+        <button value="cancel" formnovalidate>キャンセル</button>
+        <button value="ok" class="primary">アップロード</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script>window.MAEDORI_API = "https://maedori-api.maedori-api.workers.dev";</script>
+  <script src="app.js?v=10"></script>
 </body>
 </html>

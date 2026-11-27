@@ -1,0 +1,20 @@
+name = "maedori-api"
+main = "src/index.js"
+compatibility_date = "2026-11-01"
+account_id = "34366a9b2e035a8ce1875dad57092dcf" # wayway — pinned so a wrong login fails instead of deploying elsewhere
+workers_dev = true
+
+[vars]
+ALLOWED_ORIGINS = "https://huangwaylon.github.io,http://127.0.0.1:8788"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "maedori"
+database_id = "4fb5055f-caab-4e15-96be-37d6e128deb5"
+
+[[kv_namespaces]]
+binding = "MEDIA" # uploads from phones, chunked
+id = "106e22301de340319e4ff7c7548ce872"
+
+[observability]
+enabled = true
