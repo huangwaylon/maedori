@@ -11,6 +11,7 @@
   const POLL_MS = 15000;
   const SAVE_DELAY_MS = 800;
   const EDGE_PX = 100; // auto-scroll when dragging this close to the top/bottom
+  const ASSET_V = "6"; // keep in step with ?v= in index.html so phones fetch re-cut clips
   const SECTIONS = Object.keys(window.SECTIONS);
   const CLIPS = window.CLIPS; // id -> { start, end, w, h }
   const LEGACY = window.LEGACY || {}; // old screenshot id -> clip id
@@ -93,12 +94,12 @@
       `<span class="time"></span></div>` +
       `<button class="grip" type="button" aria-label="並べ替え（ドラッグ、または↑↓キー）">${GRIP_SVG}</button>`;
     const video = card.querySelector("video");
-    video.poster = `clips/${id}.jpg`;
-    video.src = `clips/${id}.mp4`;
+    video.poster = `clips/${id}.jpg?v=${ASSET_V}`;
+    video.src = `clips/${id}.mp4?v=${ASSET_V}`;
     video.style.aspectRatio = `${clip.w} / ${clip.h}`;
     video.setAttribute("aria-label", `${fmt(clip.start)}–${fmt(clip.end)}`);
     video.addEventListener("click", () => (video.paused ? video.play() : video.pause()));
-    card.querySelector(".thumb").src = `clips/${id}.jpg`;
+    card.querySelector(".thumb").src = `clips/${id}.jpg?v=${ASSET_V}`;
     card.querySelector(".time").textContent = `元動画 ${fmt(clip.start)}–${fmt(clip.end)}`;
     watch(video);
 
