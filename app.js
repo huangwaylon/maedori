@@ -45,11 +45,13 @@
   // Turn untrusted data into { notes: {id: text}, order: {section: [ids]} } covering every photo once
   function clean(raw) {
     const src = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+    const known = new Set(SECTIONS.flatMap((s) => window.PHOTOS[s].map((f) => `${s}/${f}`)));
     const notes = {};
+    // the first version stored notes flat at the top level ({ id: note }); keep reading those
+    for (const [id, note] of Object.entries(src)) if (known.has(id) && typeof note === "string" && note.trim()) notes[id] = note;
     if (src.notes && typeof src.notes === "object") {
       for (const [id, note] of Object.entries(src.notes)) if (typeof note === "string" && note.trim()) notes[id] = note;
     }
-    const known = new Set(SECTIONS.flatMap((s) => window.PHOTOS[s].map((f) => `${s}/${f}`)));
     const seen = new Set();
     const order = {};
     for (const section of SECTIONS) {
