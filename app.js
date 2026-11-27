@@ -11,7 +11,7 @@
   const POLL_MS = 15000;
   const SAVE_DELAY_MS = 800;
   const EDGE_PX = 100; // auto-scroll when dragging this close to the top/bottom
-  const ASSET_V = "6"; // keep in step with ?v= in index.html so phones fetch re-cut clips
+  const ASSET_V = "7"; // keep in step with ?v= in index.html so phones fetch re-cut clips
   const SECTIONS = Object.keys(window.SECTIONS);
   const CLIPS = window.CLIPS; // id -> { start, end, w, h }
   const LEGACY = window.LEGACY || {}; // old screenshot id -> clip id
@@ -87,21 +87,29 @@
     const card = document.createElement("article");
     card.className = "card";
     card.dataset.id = id;
+    const media = clip.image ? `<img class="still" alt="" loading="lazy" decoding="async">` : `<video muted loop playsinline preload="none"></video>`;
     card.innerHTML =
-      `<div class="photo"><video muted loop playsinline preload="none"></video><img class="thumb" alt="" loading="lazy" decoding="async"></div>` +
+      `<div class="photo">${media}<img class="thumb" alt="" loading="lazy" decoding="async"></div>` +
       `<div class="caption"><span class="num"></span><p class="note"></p>` +
       `<textarea rows="1" placeholder="メモを追加" aria-label="メモ"></textarea>` +
       `<span class="time"></span></div>` +
       `<button class="grip" type="button" aria-label="並べ替え（ドラッグ、または↑↓キー）">${GRIP_SVG}</button>`;
-    const video = card.querySelector("video");
-    video.poster = `clips/${id}.jpg?v=${ASSET_V}`;
-    video.src = `clips/${id}.mp4?v=${ASSET_V}`;
-    video.style.aspectRatio = `${clip.w} / ${clip.h}`;
-    video.setAttribute("aria-label", `${fmt(clip.start)}–${fmt(clip.end)}`);
-    video.addEventListener("click", () => (video.paused ? video.play() : video.pause()));
-    card.querySelector(".thumb").src = `clips/${id}.jpg?v=${ASSET_V}`;
-    card.querySelector(".time").textContent = `元動画 ${fmt(clip.start)}–${fmt(clip.end)}`;
-    watch(video);
+    const still = `clips/${id}.jpg?v=${ASSET_V}`;
+    card.querySelector(".thumb").src = still;
+    if (clip.image) {
+      const img = card.querySelector(".still");
+      img.src = still;
+      img.style.aspectRatio = `${clip.w} / ${clip.h}`;
+    } else {
+      const video = card.querySelector("video");
+      video.poster = still;
+      video.src = `clips/${id}.mp4?v=${ASSET_V}`;
+      video.style.aspectRatio = `${clip.w} / ${clip.h}`;
+      video.setAttribute("aria-label", `${fmt(clip.start)}–${fmt(clip.end)}`);
+      video.addEventListener("click", () => (video.paused ? video.play() : video.pause()));
+      card.querySelector(".time").textContent = `元動画 ${fmt(clip.start)}–${fmt(clip.end)}`;
+      watch(video);
+    }
 
     const box = card.querySelector("textarea");
     box.addEventListener("input", () => {

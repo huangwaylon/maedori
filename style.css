@@ -133,7 +133,8 @@ h2 {
 }
 
 /* each clip keeps its own shape (aspect-ratio set inline), but never taller than most of the screen */
-.photo video {
+.photo video,
+.photo .still {
   display: block;
   width: 100%;
   height: auto;
@@ -210,7 +211,8 @@ body.editing .photo {
   -webkit-touch-callout: none;
 }
 
-body.editing .photo video { display: none; }
+body.editing .photo video,
+body.editing .photo .still { display: none; }
 body.editing .thumb { display: block; width: 100%; height: 100%; object-fit: cover; }
 body.editing .time { display: block; margin-top: 2px; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
 
