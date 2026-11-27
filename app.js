@@ -11,7 +11,7 @@
   const POLL_MS = 15000;
   const SAVE_DELAY_MS = 800;
   const EDGE_PX = 100; // auto-scroll when dragging this close to the top/bottom
-  const ASSET_V = "8"; // keep in step with ?v= in index.html so phones fetch re-cut clips
+  const ASSET_V = "9"; // keep in step with ?v= in index.html so phones fetch re-cut clips
   const SECTIONS = Object.keys(window.SECTIONS);
   const CLIPS = window.CLIPS; // id -> { start, end, w, h }
   const LEGACY = window.LEGACY || {}; // old screenshot id -> clip id
@@ -164,17 +164,52 @@
     }
   }
 
+  // ---- Sections (tap a heading to collapse / expand; remembered per device) ----
+  const COLLAPSED_KEY = "maedori:collapsed";
+  const CHEVRON_SVG =
+    '<svg class="chev" viewBox="0 0 20 20" aria-hidden="true"><path d="M5 7.5l5 5 5-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  const sectionEls = {}; // section -> <section>
+  const toggles = {}; // section -> heading button
+  let collapsed;
+  try {
+    collapsed = new Set(JSON.parse(localStorage.getItem(COLLAPSED_KEY)) || []);
+  } catch {
+    collapsed = new Set();
+  }
+
   for (const section of SECTIONS) {
-    const head = document.createElement("div");
-    head.className = "section-head";
-    head.innerHTML = `<h2></h2><span class="count"></span>`;
-    head.querySelector("h2").textContent = section;
-    counts[section] = head.querySelector(".count");
+    const el = document.createElement("section");
+    el.innerHTML =
+      `<h2 class="section-head"><button class="section-toggle" type="button">` +
+      `${CHEVRON_SVG}<span class="name"></span><span class="count"></span></button></h2>`;
+    el.querySelector(".name").textContent = section;
+    counts[section] = el.querySelector(".count");
     const list = document.createElement("div");
     list.className = "list";
     list.dataset.section = section;
+    list.id = `list-${SECTIONS.indexOf(section)}`;
+    el.append(list);
+    const btn = el.querySelector(".section-toggle");
+    btn.setAttribute("aria-controls", list.id);
+    btn.addEventListener("click", () => setCollapsed(section, !collapsed.has(section), true));
     lists[section] = list;
-    main.append(head, list);
+    sectionEls[section] = el;
+    toggles[section] = btn;
+    main.append(el);
+    setCollapsed(section, collapsed.has(section), false);
+  }
+
+  function setCollapsed(section, on, jump) {
+    on ? collapsed.add(section) : collapsed.delete(section);
+    localStorage.setItem(COLLAPSED_KEY, JSON.stringify([...collapsed]));
+    lists[section].hidden = on;
+    sectionEls[section].classList.toggle("collapsed", on);
+    toggles[section].setAttribute("aria-expanded", String(!on));
+    if (!jump) return;
+    // bring the section's heading to the top: collapsing from deep inside it, or opening it to jump there
+    const barBottom = document.querySelector(".bar").getBoundingClientRect().bottom;
+    const top = sectionEls[section].getBoundingClientRect().top;
+    if (!on || top < barBottom) scrollTo({ top: top + scrollY - barBottom, behavior: on ? "auto" : "smooth" });
   }
   for (const id of SECTIONS.flatMap((s) => data.order[s])) cards[id] = makeCard(id);
 
@@ -254,12 +289,18 @@
     if (step < 0) {
       const prev = card.previousElementSibling;
       if (prev) list.insertBefore(card, prev);
-      else if (i > 0) lists[SECTIONS[i - 1]].append(card);
+      else if (i > 0) {
+        lists[SECTIONS[i - 1]].append(card);
+        setCollapsed(SECTIONS[i - 1], false, false);
+      }
       else return;
     } else {
       const next = card.nextElementSibling;
       if (next) list.insertBefore(card, next.nextElementSibling);
-      else if (i < SECTIONS.length - 1) lists[SECTIONS[i + 1]].prepend(card);
+      else if (i < SECTIONS.length - 1) {
+        lists[SECTIONS[i + 1]].prepend(card);
+        setCollapsed(SECTIONS[i + 1], false, false);
+      }
       else return;
     }
     card.scrollIntoView({ block: "nearest" });
@@ -310,7 +351,7 @@
   // Move the dragged card to wherever the finger is now
   function place() {
     const y = drag.y;
-    const all = Object.values(lists);
+    const all = Object.values(lists).filter((l) => !l.hidden); // can't drop into a collapsed section
     // the section under the finger, else the nearest one
     let list = all.find((l) => {
       const r = l.getBoundingClientRect();
