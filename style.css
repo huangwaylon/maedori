@@ -9,7 +9,7 @@
   --accent: #b5473a;
   --shadow: 0 1px 2px rgba(42, 36, 32, 0.06), 0 6px 20px rgba(42, 36, 32, 0.08);
   --lift: 0 12px 32px rgba(42, 36, 32, 0.22);
-  --bar: rgba(246, 242, 236, 0.9);
+  --bar: #f6f2ec; /* opaque: sticky section headings slide under it */
   --serif: "Hiragino Mincho ProN", "Yu Mincho", "Noto Serif JP", serif;
   --sans: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Noto Sans JP", sans-serif;
   --bar-h: 56px;
@@ -27,7 +27,7 @@
     --accent: #e3806f;
     --shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
     --lift: 0 12px 32px rgba(0, 0, 0, 0.6);
-    --bar: rgba(23, 20, 18, 0.92);
+    --bar: #171412;
   }
 }
 
@@ -154,22 +154,20 @@ section.collapsed .section-toggle { padding-bottom: 14px; }
 .card { position: relative; }
 
 .photo {
-  display: block;
-  overflow: hidden;
-  border-radius: 14px;
-  background: #000;
-  box-shadow: var(--shadow);
+  display: flex;
+  justify-content: center; /* tall clips are narrower than the column: center them */
 }
 
 /* each clip keeps its own shape (aspect-ratio set inline), but never taller than most of the screen */
 .photo video,
 .photo .still {
   display: block;
-  width: 100%;
+  width: 100%; /* JS narrows tall items so they stay under 72vh without side bars */
   height: auto;
-  max-height: 72vh;
-  object-fit: contain;
+  object-fit: cover;
+  border-radius: 14px;
   background: #000;
+  box-shadow: var(--shadow);
 }
 
 .thumb,
@@ -234,7 +232,9 @@ body.editing .photo {
   flex: none;
   width: 60px;
   height: 60px;
+  overflow: hidden;
   border-radius: 8px;
+  background: #000;
   box-shadow: none;
   pointer-events: none; /* no accidental opens while editing */
   -webkit-touch-callout: none;
@@ -349,7 +349,7 @@ dialog {
   color: var(--ink);
   box-shadow: var(--lift);
 }
-dialog::backdrop { background: rgba(0, 0, 0, 0.35); }
+dialog::backdrop { background: rgba(0, 0, 0, 0.5); }
 dialog form { display: flex; flex-direction: column; gap: 12px; padding: 20px; }
 dialog h3 { margin: 0; font: 600 17px/1.3 var(--serif); letter-spacing: 0.06em; }
 dialog .hint { margin: 0; color: var(--muted); font-size: 13px; }
@@ -368,7 +368,7 @@ dialog select {
   font: 16px var(--sans); /* 16px stops iOS zooming on focus */
 }
 dialog input[hidden] { display: none; }
-dialog .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+dialog .actions { display: flex; flex-direction: row-reverse; justify-content: flex-start; gap: 8px; margin-top: 4px; } /* OK is first in the DOM, shown on the right */
 dialog .actions button {
   min-height: 44px;
   padding: 0 16px;
@@ -381,5 +381,18 @@ dialog .actions button {
 }
 dialog .actions .primary { background: var(--accent); color: #fff; font-weight: 600; }
 
-.note a { color: var(--accent); text-decoration: none; overflow-wrap: anywhere; }
+.note a { display: inline-block; padding: 12px 0; margin: -12px 0; color: var(--accent); text-decoration: none; overflow-wrap: anywhere; } /* 44pt tap target without changing layout */
 .note a:active { opacity: 0.6; }
+
+/* first load / nothing cached */
+#empty { padding: 48px 20px; text-align: center; color: var(--muted); }
+#empty .retry {
+  min-height: 44px;
+  margin-top: 12px;
+  padding: 0 20px;
+  border: 1px solid var(--line);
+  border-radius: 22px;
+  background: var(--surface);
+  color: var(--accent);
+  font: 15px var(--sans);
+}

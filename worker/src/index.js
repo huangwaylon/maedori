@@ -1,11 +1,12 @@
 // maedori-api — shared storage for the 前撮り メモ site (GitHub Pages frontend).
 // D1 holds sections, items (clips/photos), their order and notes.
 // Media: the original clips/photos live in the GitHub repo (served by Pages, key "clips/…");
-// photos/videos uploaded from phones live in KV (key "uploads/…"), split into 20 MB chunks.
+// photos/videos uploaded from phones live in KV (key "uploads/…"), split into 5 MB chunks.
 // Reads are public. Every write needs the passcode (Bearer token), set as the PASSCODE secret.
 
 const MAX_UPLOAD = 95 * 1024 * 1024; // Workers accept request bodies up to 100 MB
-const CHUNK = 20 * 1024 * 1024; // KV values max out at 25 MiB
+const CHUNK = 5 * 1024 * 1024; // KV values max out at 25 MiB; small chunks keep each video seek cheap
+const KV_CACHE = { cacheTtl: 86400 }; // upload chunks never change, so let the edge cache KV reads
 const MEDIA_TYPES = /^(image\/(jpeg|png|webp|gif)|video\/(mp4|quicktime|webm))$/;
 const EXT = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif", "video/mp4": "mp4", "video/quicktime": "mov", "video/webm": "webm" };
 
@@ -28,21 +29,27 @@ export default {
 
 async function route(request, env, url) {
   const { pathname } = url;
+  const tail = (prefix) => {
+    try {
+      return decodeURIComponent(pathname.slice(prefix.length));
+    } catch {
+      throw fail(400, "bad path");
+    }
+  };
   const method = request.method;
 
   if (method === "GET" && pathname === "/api/data") return json(await readAll(env));
-  if ((method === "GET" || method === "HEAD") && pathname.startsWith("/media/")) return media(request, env, decodeURIComponent(pathname.slice(7)));
+  if ((method === "GET" || method === "HEAD") && pathname.startsWith("/media/")) return media(request, env, tail("/media/"));
 
   // ---- writes ----
   if (!(await authorized(request, env))) throw fail(401, "passcode required");
   if (method === "POST" && pathname === "/api/check") return json({ ok: true });
-  if (method === "PUT" && pathname.startsWith("/api/notes/")) return setNote(request, env, decodeURIComponent(pathname.slice(11)));
+  if (method === "PUT" && pathname.startsWith("/api/notes/")) return setNote(request, env, tail("/api/notes/"));
   if (method === "PUT" && pathname === "/api/order") return setOrder(request, env);
   if (method === "POST" && pathname === "/api/sections") return addSection(request, env);
   if (method === "POST" && pathname === "/api/upload") return upload(request, env, url);
-  if (method === "PUT" && pathname.startsWith("/api/poster/")) return setPoster(request, env, decodeURIComponent(pathname.slice(12)));
-  if (method === "PUT" && pathname === "/api/import") return importItem(request, env);
-  if (method === "DELETE" && pathname.startsWith("/api/items/")) return removeItem(env, decodeURIComponent(pathname.slice(11)));
+  if (method === "PUT" && pathname.startsWith("/api/poster/")) return setPoster(request, env, tail("/api/poster/"));
+  if (method === "DELETE" && pathname.startsWith("/api/items/")) return removeItem(env, tail("/api/items/"));
   throw fail(404, "not found");
 }
 
@@ -71,8 +78,9 @@ async function readAll(env) {
 
 async function media(request, env, key) {
   if (!key.startsWith("uploads/")) throw fail(404, "not found");
-  const meta = await env.MEDIA.get(`m:${key}`, "json");
+  const meta = await env.MEDIA.get(`m:${key}`, { type: "json", ...KV_CACHE });
   if (!meta) throw fail(404, "not found");
+  const size = meta.chunk || CHUNK; // chunk size this file was stored with
   const headers = new Headers({
     "content-type": meta.type,
     "accept-ranges": "bytes",
@@ -93,28 +101,32 @@ async function media(request, env, key) {
   headers.set("content-length", String(end - start + 1));
   if (request.method === "HEAD") return new Response(null, { status, headers });
   // stream the chunks that cover [start, end]; FixedLengthStream keeps Content-Length on the response
-  const first = Math.floor(start / CHUNK), last = Math.floor(end / CHUNK);
+  const first = Math.floor(start / size), last = Math.floor(end / size);
   const { readable, writable } = new FixedLengthStream(end - start + 1);
   (async () => {
     const writer = writable.getWriter();
     try {
       for (let i = first; i <= last; i++) {
-        const buf = new Uint8Array(await env.MEDIA.get(`c:${key}:${i}`, "arrayBuffer"));
-        const from = i === first ? start - i * CHUNK : 0;
-        const to = i === last ? end - i * CHUNK + 1 : buf.length;
+        const chunk = await env.MEDIA.get(`c:${key}:${i}`, { type: "arrayBuffer", ...KV_CACHE });
+        if (!chunk) throw new Error(`missing chunk ${i} of ${key}`); // never send a silently short file
+        const buf = new Uint8Array(chunk);
+        const from = i === first ? start - i * size : 0;
+        const to = i === last ? end - i * size + 1 : buf.length;
         await writer.write(buf.subarray(from, to));
       }
       await writer.close();
     } catch (err) {
-      await writer.abort(err);
+      // the viewer may simply have gone away (Safari drops connections when seeking)
+      await writer.abort(err).catch(() => {});
     }
   })();
-  const body = readable;
-  return new Response(body, { status, headers });
+  return new Response(readable, { status, headers });
 }
 
-// Stream a request body into KV in CHUNK-sized pieces; returns the total size
+// Stream a request body into KV in CHUNK-sized pieces; returns the total size.
+// On any failure the chunks written so far are removed, so nothing is left behind.
 async function putChunked(env, key, stream, type) {
+  if (!stream) throw fail(400, "empty file");
   const reader = stream.getReader();
   let parts = [], have = 0, n = 0, size = 0;
   const flushChunk = async (bytes) => {
@@ -129,21 +141,28 @@ async function putChunked(env, key, stream, type) {
       else parts[0] = p.subarray(take);
     }
     have -= bytes;
-    await env.MEDIA.put(`c:${key}:${n++}`, out);
+    await env.MEDIA.put(`c:${key}:${n}`, out);
+    n++;
   };
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    size += value.length;
-    if (size > MAX_UPLOAD) throw fail(413, "file too large (max 95 MB)");
-    parts.push(value);
-    have += value.length;
-    while (have >= CHUNK) await flushChunk(CHUNK);
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.length;
+      if (size > MAX_UPLOAD) throw fail(413, "file too large (max 95 MB)");
+      parts.push(value);
+      have += value.length;
+      while (have >= CHUNK) await flushChunk(CHUNK);
+    }
+    if (have) await flushChunk(have);
+    if (!size) throw fail(400, "empty file");
+    await env.MEDIA.put(`m:${key}`, JSON.stringify({ type, size, chunks: n, chunk: CHUNK }));
+    return size;
+  } catch (err) {
+    reader.cancel().catch(() => {});
+    for (let i = 0; i < n; i++) await env.MEDIA.delete(`c:${key}:${i}`).catch(() => {});
+    throw err;
   }
-  if (have) await flushChunk(have);
-  if (!size) throw fail(400, "empty file");
-  await env.MEDIA.put(`m:${key}`, JSON.stringify({ type, size, chunks: n }));
-  return size;
 }
 
 async function deleteChunked(env, key) {
@@ -162,21 +181,27 @@ async function setNote(request, env, id) {
   return json({ ok: true });
 }
 
-// { order: { section: [ids...] } } — every listed id gets that section and position
+// { order: { section: [ids...] } } — every listed id gets that section and position.
+// One statement (json_each), since the free plan allows only ~50 D1 queries per request.
 async function setOrder(request, env) {
   const { order } = await body(request);
-  if (!order || typeof order !== "object") throw fail(400, "bad order");
+  if (!order || typeof order !== "object" || Array.isArray(order)) throw fail(400, "bad order");
   const known = new Set((await env.DB.prepare("SELECT name FROM sections").all()).results.map((r) => r.name));
-  const stmts = [];
-  let pos = 0;
+  const rows = [];
   for (const [section, ids] of Object.entries(order)) {
     if (!known.has(section) || !Array.isArray(ids)) throw fail(400, "bad section");
     for (const id of ids) {
-      if (typeof id !== "string") throw fail(400, "bad id");
-      stmts.push(env.DB.prepare("UPDATE items SET section = ?, pos = ?, updated_at = ? WHERE id = ?").bind(section, pos++, Date.now(), id));
+      if (typeof id !== "string" || id.length > 64) throw fail(400, "bad id");
+      rows.push({ id, s: section, p: rows.length });
     }
   }
-  if (stmts.length) await env.DB.batch(stmts);
+  if (rows.length > 5000) throw fail(400, "too many items");
+  if (rows.length) {
+    await env.DB.prepare(
+      `UPDATE items SET section = json_extract(j.value, '$.s'), pos = json_extract(j.value, '$.p'), updated_at = ?2
+       FROM json_each(?1) AS j WHERE items.id = json_extract(j.value, '$.id')`
+    ).bind(JSON.stringify(rows), Date.now()).run();
+  }
   return json({ ok: true });
 }
 
@@ -203,30 +228,27 @@ async function upload(request, env, url) {
   const mediaKey = `uploads/${id}.${EXT[type]}`;
   await putChunked(env, mediaKey, request.body, type);
   const w = clampInt(url.searchParams.get("w")), h = clampInt(url.searchParams.get("h"));
-  const { max } = await env.DB.prepare("SELECT COALESCE(MAX(pos), -1) AS max FROM items").first();
-  await env.DB.prepare("INSERT INTO items (id, kind, section, pos, note, w, h, media, poster, created_at, updated_at) VALUES (?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?)")
-    .bind(id, kind, section, max + 1, w, h, mediaKey, kind === "image" ? mediaKey : null, Date.now(), Date.now()).run();
+  try {
+    await env.DB.prepare(
+      `INSERT INTO items (id, kind, section, pos, note, w, h, media, poster, created_at, updated_at)
+       VALUES (?1, ?2, ?3, (SELECT COALESCE(MAX(pos), -1) + 1 FROM items), '', ?4, ?5, ?6, ?7, ?8, ?8)`
+    ).bind(id, kind, section, w, h, mediaKey, kind === "image" ? mediaKey : null, Date.now()).run();
+  } catch (err) {
+    await deleteChunked(env, mediaKey); // don't keep a file no item points at
+    throw err;
+  }
   return json({ ok: true, id });
 }
 
 // raw JPEG body: the still shown before a video plays (and as its edit-mode thumbnail)
 async function setPoster(request, env, id) {
-  const row = await env.DB.prepare("SELECT kind FROM items WHERE id = ?").bind(id).first();
+  if ((request.headers.get("content-type") || "").split(";")[0].trim() !== "image/jpeg") throw fail(400, "jpeg only");
+  const row = await env.DB.prepare("SELECT kind, poster FROM items WHERE id = ?").bind(id).first();
   if (!row || row.kind !== "video" || !id.startsWith("u")) throw fail(404, "no such video");
-  const key = `uploads/${id}.poster.jpg`;
+  const key = `uploads/${id}.poster-${Date.now().toString(36)}.jpg`; // new key each time: media is cached as immutable
   await putChunked(env, key, request.body, "image/jpeg");
   await env.DB.prepare("UPDATE items SET poster = ?, updated_at = ? WHERE id = ?").bind(key, Date.now(), id).run();
-  return json({ ok: true });
-}
-
-// one-off migration helper: upsert an item row (its files are already in the repo)
-async function importItem(request, env) {
-  const meta = await body(request);
-  await env.DB.prepare(
-    `INSERT INTO items (id, kind, section, pos, note, w, h, src_start, src_end, media, poster, created_at, updated_at)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)
-     ON CONFLICT(id) DO UPDATE SET kind=?2, section=?3, pos=?4, note=?5, w=?6, h=?7, src_start=?8, src_end=?9, media=?10, poster=?11, updated_at=?12`
-  ).bind(meta.id, meta.kind, meta.section, meta.pos, meta.note || "", meta.w, meta.h, meta.start ?? null, meta.end ?? null, meta.media, meta.poster, Date.now()).run();
+  if (row.poster) await deleteChunked(env, row.poster);
   return json({ ok: true });
 }
 

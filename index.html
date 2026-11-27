@@ -9,7 +9,7 @@
   <meta name="apple-mobile-web-app-title" content="前撮り">
   <title>前撮り メモ</title>
   <!-- bump ?v= on every deploy so phones never mix old and new files -->
-  <link rel="stylesheet" href="style.css?v=10">
+  <link rel="stylesheet" href="style.css?v=11">
 </head>
 <body>
   <header class="bar">
@@ -20,6 +20,10 @@
     <button id="mode" type="button" aria-pressed="false">編集</button>
   </header>
   <main id="sections"></main>
+  <div id="empty" hidden>
+    <p class="msg">読み込み中…</p>
+    <button type="button" class="retry" hidden>もう一度読み込む</button>
+  </div>
 
   <!-- edit mode: add photos / videos from the phone -->
   <button id="add" type="button" aria-label="写真・動画を追加">
@@ -35,8 +39,9 @@
       <input type="password" autocomplete="current-password" enterkeyhint="done" aria-label="パスコード">
       <p class="error" aria-live="polite"></p>
       <div class="actions">
-        <button value="cancel" formnovalidate>キャンセル</button>
+        <!-- primary first: Return/Done on the keyboard submits with the first button -->
         <button value="ok" class="primary">OK</button>
+        <button value="cancel" formnovalidate>キャンセル</button>
       </div>
     </form>
   </dialog>
@@ -49,13 +54,13 @@
       </label>
       <input type="text" placeholder="新しいセクション名" maxlength="40" aria-label="新しいセクション名" hidden>
       <div class="actions">
-        <button value="cancel" formnovalidate>キャンセル</button>
         <button value="ok" class="primary">アップロード</button>
+        <button value="cancel" formnovalidate>キャンセル</button>
       </div>
     </form>
   </dialog>
 
   <script>window.MAEDORI_API = "https://maedori-api.maedori-api.workers.dev";</script>
-  <script src="app.js?v=10"></script>
+  <script src="app.js?v=11"></script>
 </body>
 </html>

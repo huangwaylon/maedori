@@ -1,3 +1,4 @@
+// HISTORICAL — ran once on 2026-11-27; the /api/import endpoint it used has since been removed.
 // One-time migration: existing clips/photos (files stay in the repo) + notes/order saved on textdb.online -> maedori-api (D1).
 // usage: API=https://… PASSCODE=… SAVED=saved.json node migrate.mjs
 import { readFile } from "node:fs/promises";
