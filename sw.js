@@ -58,8 +58,8 @@ self.addEventListener("fetch", (e) => {
   // everything else (version.json, /api/data, writes) goes straight to the network
 });
 
-// the page: fresh when there is signal (so updates arrive), the cached copy when there isn't.
-// The 4s timeout only applies when there is a cached copy to fall back to; a late answer is still kept.
+// the page: the saved copy straight away (no waiting on a weak signal), refreshed in the background.
+// New versions arrive through version.json → the app reloads itself, which installs the new SW.
 async function page(req) {
   const cache = await caches.open(SHELL);
   const cached = (await cache.match("./")) || (await caches.match(req, { ignoreSearch: true }));
@@ -67,13 +67,11 @@ async function page(req) {
     if (res.ok && isOurPage(await res.clone().text())) await cache.put("./", res.clone());
     return res;
   });
-  if (!cached) return net.catch(() => Response.error());
-  try {
-    return await withTimeout(net, 4000);
-  } catch {
-    net.catch(() => {}); // still lands in the cache when it finishes
+  if (cached) {
+    net.catch(() => {});
     return cached;
   }
+  return net.catch(() => Response.error()); // first launch: nothing saved yet
 }
 
 async function shellFile(req) {
@@ -91,7 +89,10 @@ async function media(req, url) {
   const hit = await cache.match(mediaKey(url));
   if (!hit) {
     try {
-      return await fetch(req);
+      const res = await fetch(req);
+      // a whole file (e.g. a poster <img>) is kept, so the offline sync doesn't download it again
+      if (res.status === 200 && res.type !== "opaque" && !req.headers.get("range")) cache.put(mediaKey(url), res.clone()).catch(() => {});
+      return res;
     } catch {
       return new Response("", { status: 504, statusText: "offline" });
     }
@@ -123,6 +124,3 @@ async function rangeOf(res, range) {
   });
 }
 
-function withTimeout(promise, ms) {
-  return Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), ms))]);
-}

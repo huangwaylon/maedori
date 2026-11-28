@@ -843,3 +843,24 @@ h1 { gap: 6px; }
 #offline.part { background: color-mix(in srgb, #b7791f 16%, transparent); color: #8a5a12; }
 #offline.part::before { content: "△"; }
 @media (prefers-color-scheme: dark) { #offline.part { color: #e0b064; } }
+
+/* ---- version indicator under the title (shares the line with status messages) ---- */
+.sub { display: flex; align-items: center; gap: 8px; min-width: 0; margin-top: 2px; }
+.sub #status { flex: 1; min-width: 0; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#ver {
+  position: relative;
+  flex: none;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font: 600 11px/17px var(--sans);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  cursor: pointer;
+}
+#ver::after { content: ""; position: absolute; inset: -12px -6px; } /* comfortable tap area */
+#ver.latest { color: var(--ok); }
+#ver.new { padding: 0 8px; border-radius: 9px; background: var(--accent-fill); color: #fff; }
+#ver:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+.sub { min-height: 17px; } /* reserve the line, so messages don't shift the page */

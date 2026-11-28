@@ -6,7 +6,7 @@
 
 (() => {
   const API = window.MAEDORI_API; // set in index.html
-  const ASSET_V = "18"; // keep in step with ?v= in index.html so phones fetch updated repo files
+  const ASSET_V = "20"; // keep in step with ?v= in index.html so phones fetch updated repo files
   const CACHE_KEY = "maedori:cache";
   const PASS_KEY = "maedori:passcode";
   const COLLAPSED_KEY = "maedori:collapsed";
@@ -1172,7 +1172,9 @@
     const gen = writeGen;
     pulling = true;
     try {
-      const remote = await api("/api/data", { timeout: 10000 });
+      const first = window.MAEDORI_FIRST; // started in index.html before this script loaded
+      window.MAEDORI_FIRST = null;
+      const remote = first ? await first : await api("/api/data", { timeout: 10000 });
       pullFails = 0;
       // pending notes/撮影済み are layered over the server data by render(), so other phones' changes still show
       if (gen === writeGen && !drag && JSON.stringify(remote) !== localStorage.getItem(CACHE_KEY)) show(remote);
@@ -1392,12 +1394,41 @@
   let newVersion = null;
   const updateBar = document.getElementById("update");
   const safeToReload = () => !editing && !drag && !sheet && !orderDirty && !passDialog.open && !uploadDialog.open && !uploading;
+  // "is this the latest version?" under the title: v18 ✓最新 / v18 → v19 更新 / v18 確認できません
+  const verBtn = document.getElementById("ver");
+  let verState = "checking";
+  function showVersion() {
+    const label = {
+      checking: [`v${ASSET_V} 確認中`, "最新かどうか確認しています"],
+      latest: [`v${ASSET_V} ✓最新`, "最新のバージョンです"],
+      new: [`v${ASSET_V} → v${newVersion} 更新`, `新しいバージョン v${newVersion} があります。押すと更新します`],
+      unknown: [`v${ASSET_V} 確認できません`, "電波がないため、最新か確認できません。押すともう一度確認します"],
+    }[verState];
+    verBtn.textContent = label[0];
+    verBtn.setAttribute("aria-label", label[1]);
+    verBtn.className = verState;
+  }
+  verBtn.addEventListener("click", async () => {
+    if (verState === "new") return reloadToNew();
+    verState = "checking";
+    showVersion();
+    await checkVersion();
+    if (verState === "latest") setStatus("最新のバージョンです", { fade: true });
+    else if (verState === "unknown") setStatus("確認できませんでした（電波がありません）", { warn: true });
+  });
+
   async function checkVersion({ resumed = false } = {}) {
     try {
-      const res = await fetch(`version.json?t=${Date.now()}`, { cache: "no-store" });
+      const res = await fetch(`version.json?t=${Date.now()}`, { cache: "no-store", signal: timeoutSignal(8000) });
       const v = String((await res.json()).v || "");
-      if (!v || v === ASSET_V) return;
+      if (!v) throw new Error("no version");
+      if (v === ASSET_V) {
+        verState = "latest";
+        return showVersion();
+      }
       newVersion = v;
+      verState = "new";
+      showVersion();
       // auto-reload once per version: if the CDN still served old files, don't loop — show the button instead
       if (resumed && safeToReload() && localStorage.getItem("maedori:reloadedFor") !== v) {
         localStorage.setItem("maedori:reloadedFor", v);
@@ -1405,7 +1436,10 @@
       }
       updateBar.hidden = false;
       document.documentElement.style.setProperty("--update-h", `${updateBar.offsetHeight}px`);
-    } catch {} // offline: try again later
+    } catch {
+      if (verState !== "new") verState = "unknown"; // offline: try again later
+      showVersion();
+    }
   }
   async function reloadToNew() {
     if (editing || drag) return setStatus("編集を終えてから更新してください", { warn: true });
@@ -1420,16 +1454,21 @@
     location.replace(`${location.pathname}?v=${encodeURIComponent(newVersion || Date.now())}`);
   }
   updateBar.querySelector("button").addEventListener("click", reloadToNew);
-  document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) checkVersion({ resumed: true });
+  // reopening the app: refresh data, then check for a new version, then (rarely) re-check the saved clips
+  document.addEventListener("visibilitychange", async () => {
+    if (document.hidden) return;
+    await pull();
+    await checkVersion({ resumed: true });
+    if (off.have && Date.now() - lastSync > 5 * 60000) syncOffline();
   });
 
+  showVersion();
   checkVersion({ resumed: true });
 
   // ---------- offline: keep every clip/photo on the phone (service worker in sw.js) ----------
   const MEDIA_CACHE = "maedori-media"; // same name as in sw.js
   const offlineBtn = document.getElementById("offline");
-  const MAX_OFFLINE_BYTES = 60 * 1024 * 1024; // bigger uploads stream only (slicing them in the SW is too heavy for iOS)
+  const MAX_OFFLINE_BYTES = 15 * 1024 * 1024; // bigger uploads stream only (the SW slices whole files per Range request)
   const off = {
     supported: "serviceWorker" in navigator && "caches" in window,
     have: null, need: [], tooBig: new Set(), syncing: false, again: false, failed: 0, done: 0, total: 0,
@@ -1463,7 +1502,24 @@
     offlineBtn.setAttribute("aria-label", cls === "ok" ? "オフラインでも使えます" : cls === "busy" ? `オフライン用に保存中 ${text}` : `オフライン: ${text}`);
   }
 
+  // run fn over items, `width()` at a time (re-read between items, so it can narrow while a clip plays)
+  async function pool(items, width, fn) {
+    let next = 0;
+    const lane = async (n) => {
+      while (next < items.length) {
+        if (n >= width()) {
+          await new Promise((r) => setTimeout(r, 700)); // this lane rests while the screen needs the signal
+          continue;
+        }
+        await fn(items[next++]);
+      }
+    };
+    await Promise.all([0, 1, 2, 3, 4, 5].map(lane));
+  }
+  let lastSync = 0;
+
   async function syncOffline({ revalidate = false } = {}) {
+    lastSync = Date.now();
     if (!off.supported || !data.items.length) return showOffline();
     if (off.syncing) return void (off.again = true);
     off.syncing = true;
@@ -1480,8 +1536,9 @@
       // after a deploy, ask the server whether any repo clip was re-cut (cheap 304s via ETag)
       if (revalidate || localStorage.getItem("maedori:mediaV") !== MEDIA_V) {
         let answered = true;
-        for (const url of off.need) {
-          if (url.origin !== location.origin || !off.have.has(cacheKey(url))) continue;
+        const ours = off.need.filter((url) => url.origin === location.origin && off.have.has(cacheKey(url)));
+        await pool(ours, () => (answered ? 6 : 0) || 6, async (url) => {
+          if (!answered) return; // no connection: try again later
           const old = await cache.match(cacheKey(url));
           const etag = old?.headers.get("etag");
           const check = new URL(url);
@@ -1492,23 +1549,34 @@
             else if (res.status !== 304) answered = false;
           } catch {
             answered = false;
-            break; // no connection: try again later
           }
-        }
+        });
         if (answered) localStorage.setItem("maedori:mediaV", MEDIA_V);
       }
-      const todo = missingMedia();
+      // posters first (small, they make the page usable), then clips — both in page order starting at the screen
+      const cardsInOrder = [...document.querySelectorAll(".card")];
+      const here = Math.max(0, cardsInOrder.findIndex((c) => c.getBoundingClientRect().bottom > 0));
+      const place = new Map();
+      cardsInOrder.forEach((c, i) => {
+        const item = data.items.find((x) => x.id === c.dataset.id);
+        const d = (i - here + cardsInOrder.length) % cardsInOrder.length; // from the screen down, then wrap
+        for (const k of [item?.poster, item?.media]) if (k && !place.has(cacheKey(absUrl(k)))) place.set(cacheKey(absUrl(k)), { d, poster: k === item.poster && item.kind === "video" });
+      });
+      const rank = (u) => {
+        const p = place.get(cacheKey(u)) || { d: 1e6, poster: false };
+        return (p.poster ? 0 : 1e7) + p.d;
+      };
+      const todo = missingMedia().sort((a, b) => rank(a) - rank(b));
       off.total = todo.length;
       off.done = 0;
       off.failed = 0;
       if (todo.length) {
         showOffline();
-        let next = 0;
-        const worker = async () => {
-          while (next < todo.length) {
-            const url = todo[next++];
+        await pool(todo, () => 2, async (url) => {
+          // 2 at a time: Safari is nearly always playing a clip, and the screen comes first
+          {
             try {
-              const res = await fetch(url, { cache: "no-store" }); // whole file (no Range), straight from the network
+              const res = await fetch(url); // whole file (no Range); the browser's copy is reused if it has one
               if (res.status !== 200) throw new Error(res.status);
               if (Number(res.headers.get("content-length") || 0) > MAX_OFFLINE_BYTES) {
                 off.tooBig.add(cacheKey(url));
@@ -1532,8 +1600,7 @@
             }
             showOffline();
           }
-        };
-        await Promise.all([worker(), worker(), worker()]); // 3 at a time
+        });
       }
     } catch {
       // e.g. storage full: the badge shows what's missing
@@ -1556,10 +1623,10 @@
     } catch {}
     navigator.serviceWorker.addEventListener("controllerchange", showOffline);
     await navigator.serviceWorker.ready;
+    await new Promise((r) => setTimeout(r, 4000)); // let the first screen's clips and posters load first
     syncOffline();
   }
   addEventListener("online", () => syncOffline());
-  document.addEventListener("visibilitychange", () => !document.hidden && off.have && syncOffline());
   addEventListener("offline", showOffline);
 
   offlineBtn.addEventListener("click", async () => {
@@ -1600,5 +1667,5 @@
   render();
   pull().finally(startOffline);
   setInterval(pull, POLL_MS);
-  document.addEventListener("visibilitychange", pull);
+
 })();

@@ -8,14 +8,20 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-title" content="前撮り">
   <title>前撮り メモ</title>
+  <link rel="preconnect" href="https://maedori-api.maedori-api.workers.dev" crossorigin>
+  <link rel="icon" href="icon-180.png">
+  <link rel="apple-touch-icon" href="icon-180.png">
   <!-- every deploy: bump ?v= here, ASSET_V in app.js and version.json together (open apps update themselves) -->
-  <link rel="stylesheet" href="style.css?v=18">
+  <link rel="stylesheet" href="style.css?v=20">
 </head>
 <body>
   <header class="bar">
     <div class="titles">
       <h1>前撮り メモ <button id="offline" type="button" hidden></button></h1>
-      <p id="status" aria-live="polite"></p>
+      <div class="sub">
+        <button id="ver" type="button"></button>
+        <p id="status" aria-live="polite"></p>
+      </div>
     </div>
     <div class="bar-actions">
       <button id="undo" type="button" aria-label="元に戻す" title="元に戻す (⌘Z)" hidden>
@@ -74,7 +80,18 @@
     </form>
   </dialog>
 
-  <script>window.MAEDORI_API = "https://maedori-api.maedori-api.workers.dev";</script>
-  <script src="app.js?v=18"></script>
+  <script>
+    window.MAEDORI_API = "https://maedori-api.maedori-api.workers.dev";
+    // start loading the data now, in parallel with app.js (the first poll uses this; parsed JSON, read once)
+    window.MAEDORI_FIRST = (() => {
+      const c = new AbortController();
+      setTimeout(() => c.abort(), 10000);
+      const p = fetch(window.MAEDORI_API + "/api/data", { cache: "no-store", signal: c.signal })
+        .then((r) => (r.ok ? r.json() : Promise.reject(new Error("HTTP " + r.status))));
+      p.catch(() => {}); // offline: app.js handles it
+      return p;
+    })();
+  </script>
+  <script src="app.js?v=20"></script>
 </body>
 </html>
