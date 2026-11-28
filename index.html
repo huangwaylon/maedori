@@ -8,8 +8,8 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-title" content="前撮り">
   <title>前撮り メモ</title>
-  <!-- bump ?v= on every deploy so phones never mix old and new files -->
-  <link rel="stylesheet" href="style.css?v=14">
+  <!-- every deploy: bump ?v= here, ASSET_V in app.js and version.json together (open apps update themselves) -->
+  <link rel="stylesheet" href="style.css?v=15">
 </head>
 <body>
   <header class="bar">
@@ -17,8 +17,20 @@
       <h1>前撮り メモ</h1>
       <p id="status" aria-live="polite"></p>
     </div>
-    <button id="mode" type="button" aria-pressed="false">編集</button>
+    <div class="bar-actions">
+      <button id="undo" type="button" aria-label="元に戻す" title="元に戻す (⌘Z)" hidden>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 14L4 9l5-5M4 9h10.5a5.5 5.5 0 0 1 0 11H11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+      <button id="redo" type="button" aria-label="やり直す" title="やり直す (⇧⌘Z)" hidden>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 14l5-5-5-5M20 9H9.5a5.5 5.5 0 0 0 0 11H13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+      <button id="mode" type="button" aria-pressed="false">編集</button>
+    </div>
   </header>
+  <div id="update" role="status" hidden>
+    <span>新しいバージョンがあります</span>
+    <button type="button">更新</button>
+  </div>
   <main id="sections"></main>
   <div id="empty" hidden>
     <p class="msg">読み込み中…</p>
@@ -61,6 +73,6 @@
   </dialog>
 
   <script>window.MAEDORI_API = "https://maedori-api.maedori-api.workers.dev";</script>
-  <script src="app.js?v=14"></script>
+  <script src="app.js?v=15"></script>
 </body>
 </html>

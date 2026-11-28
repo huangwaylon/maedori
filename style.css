@@ -674,3 +674,73 @@ section.drop-target .section-toggle .count::before { content: "ここへ移動 �
 .done-btn::before { content: "✓"; margin-right: 6px; color: var(--accent); font-weight: 700; }
 .card.done .done-btn { min-height: 44px; font-size: 14px; }
 .card.done .done-btn::before { content: none; }
+
+/* 撮影済み button sits on the number/note line (no row of its own); slim pill, ~44px tap area */
+.caption .note { flex: 1; min-width: 0; }
+.caption .done-btn {
+  position: relative;
+  flex: none;
+  align-self: flex-start;
+  min-height: 34px;
+  margin: -3px 0 0;
+  padding: 0 12px;
+  border-width: 1px;
+  border-radius: 17px;
+  font-size: 14px;
+}
+.caption .done-btn::after { content: ""; position: absolute; inset: -5px -4px; } /* bigger hit area than it looks */
+.caption .done-btn::before { margin-right: 4px; }
+.card.done .caption .done-btn { min-height: 34px; padding: 0 4px; font-size: 13px; }
+
+/* ---- Undo / redo in the header ---- */
+.bar-actions { display: flex; align-items: center; }
+#undo, #redo {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  cursor: pointer;
+}
+#undo[hidden], #redo[hidden] { display: none; }
+#undo svg, #redo svg { width: 22px; height: 22px; }
+#undo:disabled, #redo:disabled { color: var(--muted); opacity: 0.35; cursor: default; }
+#undo:focus-visible, #redo:focus-visible { outline: 2px solid var(--accent); outline-offset: -4px; border-radius: 10px; }
+
+/* the card an undo/redo just changed */
+@media (prefers-reduced-motion: no-preference) {
+  .card.flash { animation: flash 1.2s ease-out; }
+  @keyframes flash { from { box-shadow: 0 0 0 3px var(--accent); border-radius: 14px; } to { box-shadow: 0 0 0 3px transparent; border-radius: 14px; } }
+}
+
+/* ---- "new version" bar under the header ---- */
+#update {
+  position: sticky;
+  top: calc(var(--bar-h) + var(--safe-top));
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  max-width: 560px;
+  margin: 0 auto;
+  padding: 10px 12px 10px 20px;
+  background: var(--accent);
+  color: #fff;
+  font: 600 15px var(--sans);
+}
+#update[hidden] { display: none; }
+#update button {
+  min-width: 88px;
+  min-height: 44px;
+  border: 0;
+  border-radius: 22px;
+  background: #fff;
+  color: var(--accent);
+  font: 700 17px var(--sans);
+  cursor: pointer;
+}
+#update button:disabled { opacity: 0.6; }

@@ -6,7 +6,7 @@
 
 (() => {
   const API = window.MAEDORI_API; // set in index.html
-  const ASSET_V = "14"; // keep in step with ?v= in index.html so phones fetch updated repo files
+  const ASSET_V = "15"; // keep in step with ?v= in index.html so phones fetch updated repo files
   const CACHE_KEY = "maedori:cache";
   const PASS_KEY = "maedori:passcode";
   const COLLAPSED_KEY = "maedori:collapsed";
@@ -46,6 +46,7 @@
   let writing = Promise.resolve();
   let writeGen = 0; // bumped by every write, so an older poll can't overwrite newer data
   let saveTimer, statusTimer;
+  let uploading = false;
   const collapsed = new Set(readJSON(COLLAPSED_KEY) || []);
 
   // ---------- small helpers ----------
@@ -145,13 +146,13 @@
     card.innerHTML =
       `<div class="photo"><div class="frame">${media}<span class="stamp" aria-hidden="true">撮影済</span></div>` +
       `<img class="thumb" alt="" loading="lazy" decoding="async"></div>` +
-      `<div class="caption"><span class="num"></span><p class="note"></p>` +
+      `<div class="caption"><span class="num"></span><p class="note"></p><button class="done-btn" type="button"></button>` +
       `<textarea rows="1" placeholder="メモを追加" aria-label="メモ"></textarea>` +
       `<div class="tags"></div>` +
       `<span class="time"></span><span class="row-actions"><button class="tag-btn" type="button">タグ</button>` +
       `<button class="move" type="button">移動</button>` +
       (item.id.startsWith("u") ? `<button class="remove" type="button">削除</button>` : "") +
-      `</span></div><button class="done-btn" type="button"></button>` +
+      `</span></div>` +
       `<button class="grip" type="button" aria-label="並べ替え（ドラッグ、または↑↓キー）">${GRIP_SVG}</button>`;
     const still = item.poster || (item.kind === "image" ? item.media : "");
     card.dataset.poster = still;
@@ -195,7 +196,13 @@
       clearTimeout(saveTimer);
       saveTimer = setTimeout(flush, SAVE_DELAY_MS);
     });
-    box.addEventListener("blur", flush);
+    box.addEventListener("focus", () => (box.dataset.start = box.value));
+    box.addEventListener("blur", () => {
+      const was = box.dataset.start, now = box.value;
+      if (was !== undefined && now !== was) record({ label: "メモ", id: item.id, undo: () => applyNote(item.id, was), redo: () => applyNote(item.id, now) });
+      delete box.dataset.start;
+      flush();
+    });
 
     card.querySelector(".remove")?.addEventListener("click", () => removeItem(item.id));
     card.querySelector(".done-btn").addEventListener("click", () => confirmDone(item.id));
@@ -368,7 +375,11 @@
     return order;
   }
 
-  function commitOrder() {
+  function commitOrder(before) {
+    if (before) {
+      const after = domOrder();
+      if (JSON.stringify(after) !== JSON.stringify(before)) record({ label: "並べ替え", undo: () => applyOrder(before), redo: () => applyOrder(after) });
+    }
     renumber();
     orderDirty = true;
     setStatus("保存中…");
@@ -481,6 +492,8 @@
   async function setDone(id, on) {
     if (!localStorage.getItem(PASS_KEY) && !(await askPasscode())) return; // saving needs the passcode (asked once)
     if (!cards[id]) return;
+    const was = cards[id].classList.contains("done");
+    if (was !== on) record({ label: on ? "撮影済み" : "未撮影に戻す", id, undo: () => setDone(id, was), redo: () => setDone(id, on) });
     unsyncedDone[id] = on;
     saveUnsynced();
     showDone(cards[id], on);
@@ -503,8 +516,9 @@
           label: name,
           run: () => {
             if (cards[id] !== card || !lists[name]) return; // deleted/renamed on another phone meanwhile
+            const before = domOrder();
             lists[name].append(card);
-            commitOrder();
+            commitOrder(before);
             setStatus(`「${name}」へ移動しました`, { fade: true });
           },
         })),
@@ -566,10 +580,17 @@
 
   function toggleTag(item, tagId, redraw) {
     const now = tagsOf(item);
-    unsyncedTags[item.id] = now.includes(tagId) ? now.filter((t) => t !== tagId) : [...now, tagId];
-    saveUnsynced();
-    if (cards[item.id]) showTags(cards[item.id], unsyncedTags[item.id]);
+    applyTags(item.id, now.includes(tagId) ? now.filter((t) => t !== tagId) : [...now, tagId]);
+    const next = unsyncedTags[item.id];
+    record({ label: "タグ", id: item.id, undo: () => applyTags(item.id, now), redo: () => applyTags(item.id, next) });
     redraw?.();
+  }
+
+  function applyTags(id, tags) {
+    unsyncedTags[id] = tags;
+    saveUnsynced();
+    if (cards[id]) showTags(cards[id], tags);
+    sheet?.redraw?.();
     setStatus("保存中…");
     flush();
   }
@@ -608,6 +629,84 @@
       if (err.auth) passcodeLost();
       else setStatus(err.status === 409 ? "同じ名前のタグがあります" : "変更できませんでした", { warn: true });
     }
+  }
+
+  // ---------- undo / redo (this phone's own changes) ----------
+  const undoBtn = document.getElementById("undo");
+  const redoBtn = document.getElementById("redo");
+  const past = [], future = [];
+  let replaying = false;
+
+  function record(entry) {
+    if (replaying) return; // the undo/redo itself is not a new step
+    past.push(entry);
+    if (past.length > 100) past.shift();
+    future.length = 0;
+    showHistory();
+  }
+
+  function showHistory() {
+    undoBtn.hidden = redoBtn.hidden = !past.length && !future.length;
+    undoBtn.disabled = !past.length;
+    redoBtn.disabled = !future.length;
+    undoBtn.title = past.length ? `元に戻す：${past.at(-1).label}` : "元に戻す";
+    redoBtn.title = future.length ? `やり直す：${future.at(-1).label}` : "やり直す";
+  }
+
+  async function step(from, to, verb) {
+    if (drag || passDialog.open) return;
+    if (sheet) closeSheet();
+    document.activeElement?.blur(); // a note being typed becomes its own step first
+    const entry = from.pop();
+    if (!entry) return;
+    replaying = true;
+    try {
+      await entry[verb === "元に戻しました" ? "undo" : "redo"]();
+    } finally {
+      replaying = false;
+    }
+    to.push(entry);
+    showHistory();
+    await writing; // let "保存しました" pass first, then say what was undone
+    setStatus(`${verb}（${entry.label}）`, { fade: true });
+    const card = entry.id && cards[entry.id];
+    if (card?.offsetParent) {
+      const r = card.getBoundingClientRect();
+      if (r.bottom < 80 || r.top > innerHeight) card.scrollIntoView({ block: "center", behavior: "smooth" });
+      card.classList.remove("flash");
+      void card.offsetWidth; // restart the animation
+      card.classList.add("flash");
+    }
+  }
+  undoBtn.addEventListener("click", () => step(past, future, "元に戻しました"));
+  redoBtn.addEventListener("click", () => step(future, past, "やり直しました"));
+  addEventListener("keydown", (e) => {
+    if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== "z" || e.altKey) return;
+    if (e.target.closest?.("textarea, input")) return; // the text box's own undo
+    e.preventDefault();
+    if (e.shiftKey) step(future, past, "やり直しました");
+    else step(past, future, "元に戻しました");
+  });
+
+  function applyNote(id, text) {
+    const card = cards[id];
+    if (!card) return;
+    const box = card.querySelector("textarea");
+    box.value = text;
+    unsynced[id] = text;
+    saveUnsynced();
+    setNote(card, text.trim() ? text : "");
+    grow(box);
+    setStatus("保存中…");
+    flush();
+  }
+
+  function applyOrder(order) {
+    for (const [name, ids] of Object.entries(order)) {
+      if (!lists[name]) continue; // section gone since
+      for (const id of ids) if (cards[id]) lists[name].append(cards[id]);
+    }
+    commitOrder();
   }
 
   // ---------- modes ----------
@@ -679,6 +778,7 @@
 
   // ---------- reorder ----------
   function moveBy(card, step) {
+    const before = domOrder();
     const list = card.parentElement;
     const names = data.sections;
     const i = names.indexOf(list.dataset.section);
@@ -698,7 +798,7 @@
       } else return;
     }
     card.scrollIntoView({ block: "nearest" });
-    commitOrder();
+    commitOrder(before);
   }
 
   function startDrag(card, y, e, pointer) {
@@ -806,9 +906,10 @@
     setDropTarget(undefined);
     drag.card.classList.remove("dragging");
     document.body.classList.remove("dragging");
-    const changed = JSON.stringify(domOrder()) !== drag.before;
+    const before = drag.before;
+    const changed = JSON.stringify(domOrder()) !== before;
     drag = null;
-    if (changed) commitOrder();
+    if (changed) commitOrder(JSON.parse(before));
     if (changed && target) setStatus(`「${target}」へ移動しました`, { fade: true });
   }
 
@@ -931,14 +1032,19 @@
     if (!files.length) return;
     const section = await pickSection(files.length);
     if (!section) return;
-    for (const [i, file] of files.entries()) {
-      writeGen++;
-      try {
-        await uploadOne(file, section, (p) => setStatus(`アップロード中 ${i + 1}/${files.length}… ${Math.round(p * 100)}%`));
-      } catch (err) {
-        setStatus(err.auth ? "パスコードをもう一度入力してください" : `アップロード失敗: ${err.message}`, { warn: true });
-        return;
+    uploading = true;
+    try {
+      for (const [i, file] of files.entries()) {
+        writeGen++;
+        try {
+          await uploadOne(file, section, (p) => setStatus(`アップロード中 ${i + 1}/${files.length}… ${Math.round(p * 100)}%`));
+        } catch (err) {
+          setStatus(err.auth ? "パスコードをもう一度入力してください" : `アップロード失敗: ${err.message}`, { warn: true });
+          return;
+        }
       }
+    } finally {
+      uploading = false;
     }
     setStatus("追加しました", { fade: true });
     writeGen++;
@@ -1112,6 +1218,39 @@
       }
     });
   }
+
+  // ---------- app updates (home-screen apps have no reload button) ----------
+  // version.json holds the deployed ASSET_V. When it changes: reload on its own as the app is opened
+  // (if nothing is mid-edit), otherwise offer a big 更新 button. Unsaved notes/撮影済み/tags are in localStorage.
+  let newVersion = null;
+  const updateBar = document.getElementById("update");
+  const safeToReload = () => !editing && !drag && !sheet && !orderDirty && !passDialog.open && !uploadDialog.open && !uploading;
+  async function checkVersion({ resumed = false } = {}) {
+    try {
+      const res = await fetch(`version.json?t=${Date.now()}`, { cache: "no-store" });
+      const v = String((await res.json()).v || "");
+      if (!v || v === ASSET_V) return;
+      newVersion = v;
+      // auto-reload once per version: if the CDN still served old files, don't loop — show the button instead
+      if (resumed && safeToReload() && localStorage.getItem("maedori:reloadedFor") !== v) {
+        localStorage.setItem("maedori:reloadedFor", v);
+        return reloadToNew();
+      }
+      updateBar.hidden = false;
+    } catch {} // offline: try again later
+  }
+  async function reloadToNew() {
+    updateBar.querySelector("button").disabled = true;
+    await flush().catch(() => {});
+    // a new URL, so Safari can't hand back the cached old page
+    location.replace(`${location.pathname}?v=${encodeURIComponent(newVersion || Date.now())}`);
+  }
+  updateBar.querySelector("button").addEventListener("click", reloadToNew);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) checkVersion({ resumed: true });
+  });
+  setInterval(() => !document.hidden && checkVersion(), 60000);
+  checkVersion({ resumed: true });
 
   // ---------- start ----------
   render();
