@@ -744,3 +744,6 @@ section.drop-target .section-toggle .count::before { content: "ここへ移動 �
   cursor: pointer;
 }
 #update button:disabled { opacity: 0.6; }
+.tag-manage > .hint { margin-bottom: 8px; }
+.sheet .tag-row .up, .sheet .tag-row .down { min-width: 40px; padding: 0; font-size: 17px; }
+.sheet .tag-row button:disabled { opacity: 0.3; }

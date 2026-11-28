@@ -48,6 +48,7 @@ async function route(request, env, url) {
   if (method === "PUT" && pathname === "/api/order") return setOrder(request, env);
   if (method === "PUT" && pathname.startsWith("/api/done/")) return setDone(request, env, tail("/api/done/"));
   if (method === "POST" && pathname === "/api/tags") return addTag(request, env);
+  if (method === "PUT" && pathname === "/api/tag-order") return setTagOrder(request, env);
   if (method === "PUT" && pathname.startsWith("/api/tags/")) return renameTag(request, env, tail("/api/tags/"));
   if (method === "DELETE" && pathname.startsWith("/api/tags/")) return removeTag(env, tail("/api/tags/"));
   if (method === "PUT" && /^\/api\/items\/[^/]+\/tags$/.test(pathname)) return setItemTags(request, env, tail("/api/items/").slice(0, -"/tags".length));
@@ -216,6 +217,14 @@ async function addTag(request, env) {
   await env.DB.prepare("INSERT OR IGNORE INTO tags (name, pos) VALUES (?1, (SELECT COALESCE(MAX(pos), -1) + 1 FROM tags))").bind(name).run();
   const row = await env.DB.prepare("SELECT id FROM tags WHERE name = ?").bind(name).first();
   return json({ ok: true, id: row.id, name });
+}
+
+// { ids: [tag ids] } — the tag list's order (items are grouped by it within each section)
+async function setTagOrder(request, env) {
+  const { ids } = await body(request);
+  if (!Array.isArray(ids) || ids.length > 500 || !ids.every((t) => Number.isInteger(t) && t > 0)) throw fail(400, "bad ids");
+  await env.DB.prepare("UPDATE tags SET pos = j.key FROM json_each(?1) AS j WHERE tags.id = j.value").bind(JSON.stringify(ids)).run();
+  return json({ ok: true });
 }
 
 async function renameTag(request, env, raw) {

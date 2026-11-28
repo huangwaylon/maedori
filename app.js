@@ -6,7 +6,7 @@
 
 (() => {
   const API = window.MAEDORI_API; // set in index.html
-  const ASSET_V = "15"; // keep in step with ?v= in index.html so phones fetch updated repo files
+  const ASSET_V = "16"; // keep in step with ?v= in index.html so phones fetch updated repo files
   const CACHE_KEY = "maedori:cache";
   const PASS_KEY = "maedori:passcode";
   const COLLAPSED_KEY = "maedori:collapsed";
@@ -364,6 +364,7 @@
         grow(box);
       }
     }
+    resort();
     renumber();
     syncPlayback();
     emptyEl.hidden = data.items.length > 0;
@@ -375,7 +376,29 @@
     return order;
   }
 
+  // Within each section: grouped by tag (in the tag list's order; a clip with several tags goes with
+  // its first one; untagged last), then our own order. Stable, so the manual order decides inside a group.
+  function tagRank(id) {
+    const item = data.items.find((i) => i.id === id);
+    const ids = item ? tagsOf(item) : [];
+    let best = Infinity;
+    allTags().forEach((t, i) => {
+      if (i < best && ids.includes(t.id)) best = i;
+    });
+    return best;
+  }
+  function resort() {
+    if (drag) return; // never move things under a finger
+    for (const list of Object.values(lists)) {
+      const now = [...list.children];
+      const rank = new Map(now.map((c) => [c, tagRank(c.dataset.id)]));
+      const sorted = [...now].sort((a, b) => rank.get(a) - rank.get(b)); // Array sort is stable
+      if (sorted.some((c, i) => c !== now[i])) for (const c of sorted) list.append(c);
+    }
+  }
+
   function commitOrder(before) {
+    resort(); // a clip dropped into another tag's group goes back to its own group
     if (before) {
       const after = domOrder();
       if (JSON.stringify(after) !== JSON.stringify(before)) record({ label: "並べ替え", undo: () => applyOrder(before), redo: () => applyOrder(after) });
@@ -590,6 +613,8 @@
     unsyncedTags[id] = tags;
     saveUnsynced();
     if (cards[id]) showTags(cards[id], tags);
+    resort();
+    renumber();
     sheet?.redraw?.();
     setStatus("保存中…");
     flush();
@@ -601,8 +626,20 @@
     for (const t of allTags()) {
       const row = document.createElement("div");
       row.className = "tag-row";
-      row.innerHTML = `<span class="tag"></span><button type="button" class="rename">名前変更</button><button type="button" class="delete">削除</button>`;
+      row.innerHTML =
+        `<span class="tag"></span><button type="button" class="up" aria-label="上へ">↑</button><button type="button" class="down" aria-label="下へ">↓</button>` +
+        `<button type="button" class="rename">名前変更</button><button type="button" class="delete">削除</button>`;
       row.querySelector(".tag").textContent = t.name;
+      const i = allTags().indexOf(t);
+      for (const [cls, d] of [["up", -1], ["down", 1]]) {
+        const b = row.querySelector(`.${cls}`);
+        b.disabled = !allTags()[i + d];
+        b.addEventListener("click", () => tagOp(async () => {
+          const ids = allTags().map((x) => x.id);
+          [ids[i], ids[i + d]] = [ids[i + d], ids[i]];
+          await api("/api/tag-order", { method: "PUT", body: { ids } });
+        }));
+      }
       row.querySelector(".rename").addEventListener("click", () => tagOp(async () => {
         const name = prompt("新しい名前", t.name)?.trim();
         if (!name || name === t.name) return false;
@@ -616,6 +653,7 @@
     }
     if (!allTags().length) body.innerHTML = `<p class="hint">まだタグがありません。</p>`;
     openSheet({ title: "タグの管理", body, close: "閉じる", kind: "tag-manage" });
+    body.insertAdjacentHTML("afterbegin", `<p class="hint">各セクションの中は、この順番のタグごとにまとまって並びます。</p>`);
   }
 
   async function tagOp(run) {
