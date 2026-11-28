@@ -46,6 +46,11 @@ async function route(request, env, url) {
   if (method === "POST" && pathname === "/api/check") return json({ ok: true });
   if (method === "PUT" && pathname.startsWith("/api/notes/")) return setNote(request, env, tail("/api/notes/"));
   if (method === "PUT" && pathname === "/api/order") return setOrder(request, env);
+  if (method === "PUT" && pathname.startsWith("/api/done/")) return setDone(request, env, tail("/api/done/"));
+  if (method === "POST" && pathname === "/api/tags") return addTag(request, env);
+  if (method === "PUT" && pathname.startsWith("/api/tags/")) return renameTag(request, env, tail("/api/tags/"));
+  if (method === "DELETE" && pathname.startsWith("/api/tags/")) return removeTag(env, tail("/api/tags/"));
+  if (method === "PUT" && /^\/api\/items\/[^/]+\/tags$/.test(pathname)) return setItemTags(request, env, tail("/api/items/").slice(0, -"/tags".length));
   if (method === "POST" && pathname === "/api/sections") return addSection(request, env);
   if (method === "POST" && pathname === "/api/upload") return upload(request, env, url);
   if (method === "PUT" && pathname.startsWith("/api/poster/")) return setPoster(request, env, tail("/api/poster/"));
@@ -55,17 +60,24 @@ async function route(request, env, url) {
 
 // ---------- reads ----------
 async function readAll(env) {
-  const [sections, items] = await env.DB.batch([
+  const [sections, items, tags, links] = await env.DB.batch([
     env.DB.prepare("SELECT name FROM sections ORDER BY pos"),
-    env.DB.prepare("SELECT id, kind, section, pos, note, w, h, src_start, src_end, media, poster FROM items ORDER BY pos"),
+    env.DB.prepare("SELECT id, kind, section, pos, note, done, w, h, src_start, src_end, media, poster FROM items ORDER BY pos"),
+    env.DB.prepare("SELECT id, name FROM tags ORDER BY pos, id"),
+    env.DB.prepare("SELECT it.item_id, it.tag_id FROM item_tags it JOIN tags t ON t.id = it.tag_id ORDER BY t.pos, t.id"),
   ]);
+  const tagsOf = {};
+  for (const r of links.results) (tagsOf[r.item_id] ||= []).push(r.tag_id);
   return {
     sections: sections.results.map((r) => r.name),
+    tags: tags.results.map((r) => ({ id: r.id, name: r.name })),
     items: items.results.map((r) => ({
       id: r.id,
       kind: r.kind,
       section: r.section,
       note: r.note || "",
+      done: !!r.done,
+      tags: tagsOf[r.id] || [],
       w: r.w,
       h: r.h,
       start: r.src_start,
@@ -178,6 +190,65 @@ async function setNote(request, env, id) {
   if (typeof note !== "string" || note.length > 5000) throw fail(400, "bad note");
   const res = await env.DB.prepare("UPDATE items SET note = ?, updated_at = ? WHERE id = ?").bind(note.trim() ? note : "", Date.now(), id).run();
   if (!res.meta.changes) throw fail(404, "no such item");
+  return json({ ok: true });
+}
+
+// { done: true|false } — 撮影済み. A plain set (not a toggle), so two phones marking the same shot agree.
+async function setDone(request, env, id) {
+  const { done } = await body(request);
+  if (typeof done !== "boolean") throw fail(400, "bad done");
+  const res = await env.DB.prepare("UPDATE items SET done = ?, updated_at = ? WHERE id = ?").bind(done ? 1 : 0, Date.now(), id).run();
+  if (!res.meta.changes) throw fail(404, "no such item");
+  return json({ ok: true });
+}
+
+// ---- tags (e.g. 顔アップ, 足元): a shared list, attached to items ----
+const tagName = (name) => (typeof name === "string" ? name.trim().slice(0, 30) : "");
+const tagId = (raw) => {
+  const id = Number(raw);
+  if (!Number.isInteger(id) || id <= 0) throw fail(400, "bad tag");
+  return id;
+};
+
+async function addTag(request, env) {
+  const name = tagName((await body(request)).name);
+  if (!name) throw fail(400, "bad name");
+  await env.DB.prepare("INSERT OR IGNORE INTO tags (name, pos) VALUES (?1, (SELECT COALESCE(MAX(pos), -1) + 1 FROM tags))").bind(name).run();
+  const row = await env.DB.prepare("SELECT id FROM tags WHERE name = ?").bind(name).first();
+  return json({ ok: true, id: row.id, name });
+}
+
+async function renameTag(request, env, raw) {
+  const id = tagId(raw);
+  const name = tagName((await body(request)).name);
+  if (!name) throw fail(400, "bad name");
+  const clash = await env.DB.prepare("SELECT id FROM tags WHERE name = ? AND id != ?").bind(name, id).first();
+  if (clash) throw fail(409, "name taken");
+  const res = await env.DB.prepare("UPDATE tags SET name = ? WHERE id = ?").bind(name, id).run();
+  if (!res.meta.changes) throw fail(404, "no such tag");
+  return json({ ok: true });
+}
+
+async function removeTag(env, raw) {
+  const id = tagId(raw);
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM item_tags WHERE tag_id = ?").bind(id),
+    env.DB.prepare("DELETE FROM tags WHERE id = ?").bind(id),
+  ]);
+  return json({ ok: true });
+}
+
+// { tags: [tag ids] } — replaces the item's tags (a plain set, so retries and two phones agree)
+async function setItemTags(request, env, id) {
+  const { tags } = await body(request);
+  if (!Array.isArray(tags) || tags.length > 50 || !tags.every((t) => Number.isInteger(t) && t > 0)) throw fail(400, "bad tags");
+  const item = await env.DB.prepare("SELECT id FROM items WHERE id = ?").bind(id).first();
+  if (!item) throw fail(404, "no such item");
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM item_tags WHERE item_id = ?").bind(id),
+    // unknown (e.g. just-deleted) tag ids are skipped
+    env.DB.prepare("INSERT OR IGNORE INTO item_tags (item_id, tag_id) SELECT ?1, t.id FROM tags t JOIN json_each(?2) j ON t.id = j.value").bind(id, JSON.stringify(tags)),
+  ]);
   return json({ ok: true });
 }
 

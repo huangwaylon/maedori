@@ -329,9 +329,8 @@ body.editing main { padding-bottom: 100px; } /* room to scroll past the button *
 .remove { display: none; }
 body.editing .remove {
   display: inline-block;
-  align-self: flex-start;
-  margin-top: 4px;
-  padding: 2px 0;
+  min-height: 36px;
+  padding: 0 4px;
   border: 0;
   background: none;
   color: var(--accent);
@@ -396,3 +395,258 @@ dialog .actions .primary { background: var(--accent); color: #fff; font-weight: 
   color: var(--accent);
   font: 15px var(--sans);
 }
+
+/* ---- Done (撮影済み): grey photo, red hanko in the corner, ✓ by the number ---- */
+.frame { position: relative; width: 100%; } /* JS narrows it to the clip's shape; the stamp sits on the picture */
+body.editing .frame { display: none; }
+
+.card.done .photo video,
+.card.done .photo .still,
+.card.done .thumb { filter: grayscale(1) brightness(0.82) contrast(0.9); }
+.card.done .frame::after { /* faint wash toward the page colour: faded, not broken */
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 14px;
+  pointer-events: none;
+  background: color-mix(in srgb, var(--bg) 22%, transparent);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .photo video, .photo .still, .thumb { transition: filter 0.3s ease; }
+}
+
+.stamp { display: none; }
+.card.done .stamp {
+  display: grid;
+  place-items: center;
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 1;
+  width: 84px;
+  height: 84px;
+  border: 3px solid #b5473a;
+  border-radius: 50%;
+  background: rgba(255, 253, 249, 0.92);
+  box-shadow: inset 0 0 0 3px rgba(255, 253, 249, 0.92), inset 0 0 0 4.5px #b5473a, 0 2px 8px rgba(0, 0, 0, 0.25);
+  color: #b5473a;
+  font: 700 20px/1 var(--serif);
+  letter-spacing: 0.04em;
+  transform: rotate(-12deg);
+  pointer-events: none;
+}
+@media (prefers-color-scheme: dark) {
+  .card.done .stamp {
+    border-color: #e3806f;
+    background: rgba(34, 30, 27, 0.9);
+    box-shadow: inset 0 0 0 3px rgba(34, 30, 27, 0.9), inset 0 0 0 4.5px #e3806f, 0 2px 8px rgba(0, 0, 0, 0.5);
+    color: #e3806f;
+  }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .card.done .stamp { animation: press 0.28s cubic-bezier(0.3, 1.6, 0.5, 1); }
+  @keyframes press { from { transform: rotate(-12deg) scale(1.4); opacity: 0; } }
+}
+
+.card.done .note { color: var(--muted); }
+.card.done .num::before { content: "✓ "; color: var(--accent); font-weight: 700; }
+
+/* big, plainly-a-button toggle under each shot (view mode only) */
+.done-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-height: 56px;
+  margin-top: 12px;
+  padding: 0 16px;
+  border: 1.5px solid color-mix(in srgb, var(--ink) 22%, transparent);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--ink);
+  font: 600 18px var(--sans);
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.done-btn:active { background: color-mix(in srgb, var(--accent) 10%, var(--surface)); }
+.done-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.card.done .done-btn {
+  min-height: 48px;
+  border-color: transparent;
+  background: none;
+  color: var(--muted);
+  font-weight: 500;
+  text-decoration: underline;
+  text-underline-offset: 4px;
+}
+
+.move,
+body.editing .done-btn,
+body.editing .card.done .stamp { display: none; }
+
+/* edit mode: send a row to another section without a long drag */
+body.editing .move {
+  display: block;
+  min-width: 64px;
+  min-height: 36px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
+  font: 600 14px var(--sans);
+  cursor: pointer;
+}
+.move:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ---- Section progress: count + a thin bar under the sticky header ---- */
+.section-toggle { position: relative; }
+.section-toggle::after {
+  content: "";
+  position: absolute;
+  right: 20px;
+  bottom: 2px;
+  left: 20px;
+  height: 2px;
+  border-radius: 1px;
+  background: linear-gradient(to right, var(--accent) var(--p, 0%), color-mix(in srgb, var(--ink) 10%, var(--bg)) 0); /* opaque, so a stacked sticky header does not show through */
+}
+section.complete .section-toggle .count { color: var(--accent); font-weight: 600; }
+
+/* ---- Bottom sheet confirm ---- */
+body.sheet-open { overflow: hidden; }
+.sheet-backdrop { position: fixed; inset: 0; z-index: 10; background: rgba(0, 0, 0, 0.4); touch-action: none; }
+.sheet {
+  position: fixed;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 11;
+  max-width: 560px;
+  max-height: 85vh;
+  max-height: 85dvh;
+  overflow-y: auto;
+  overscroll-behavior: contain; /* iOS: a swipe on the sheet must not scroll the page behind */
+  margin: 0 auto;
+  padding: 10px 20px calc(20px + env(safe-area-inset-bottom));
+  border-radius: 20px 20px 0 0;
+  background: var(--surface);
+  box-shadow: var(--lift);
+}
+.sheet::before {
+  content: "";
+  display: block;
+  width: 36px;
+  height: 5px;
+  margin: 0 auto 16px;
+  border-radius: 3px;
+  background: var(--line);
+}
+.sheet-head { display: flex; gap: 14px; align-items: center; margin-bottom: 20px; }
+.sheet-head img { flex: none; width: 72px; height: 72px; border-radius: 10px; object-fit: cover; }
+.sheet-head h3 { margin: 0; font: 600 19px/1.4 var(--serif); letter-spacing: 0.06em; }
+.sheet-actions { display: flex; flex-direction: column; gap: 12px; }
+.sheet button {
+  width: 100%;
+  min-height: 60px;
+  border: 0;
+  border-radius: 14px;
+  font: 600 18px var(--sans);
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.sheet .primary { background: var(--accent); color: #fff; }
+.sheet .choice { border: 1.5px solid color-mix(in srgb, var(--ink) 22%, transparent); background: var(--surface); color: var(--ink); font-family: var(--serif); letter-spacing: 0.08em; }
+.sheet .secondary { background: color-mix(in srgb, var(--ink) 7%, transparent); color: var(--ink); }
+.sheet button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (prefers-reduced-motion: no-preference) {
+  .sheet { animation: up 0.25s ease-out; }
+  @keyframes up { from { transform: translateY(100%); } }
+}
+.sheet:focus { outline: none; }
+
+/* ---- Edit mode: thumbnails big enough to tell the clips apart ---- */
+.row-actions { display: none; }
+body.editing .row-actions { display: flex; align-items: center; gap: 14px; margin-top: 8px; }
+body.editing .photo {
+  width: 148px;
+  height: auto;
+  max-height: 200px; /* tall clips: show the middle, never a giant row */
+}
+body.editing .thumb {
+  width: 100%;
+  height: auto;
+  aspect-ratio: 16 / 9; /* replaced inline by the clip's own shape */
+  max-height: 200px;
+}
+body.editing .card + .card::before { left: 170px; } /* separator starts after the thumbnail */
+
+/* ---- Tags: clear pills under the note ---- */
+.tags { display: flex; flex-wrap: wrap; gap: 6px; }
+.tags:empty { display: none; }
+.caption { flex-wrap: wrap; row-gap: 4px; } /* view mode: tags get their own line under number + note */
+.caption .tags { flex-basis: 100%; margin-top: 2px; }
+.tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+  color: var(--accent);
+  font: 600 14px/1.4 var(--sans);
+  letter-spacing: 0.02em;
+}
+.card.done .caption .tag { border-color: var(--line); background: none; color: var(--muted); }
+body.editing .caption .tags { margin-top: 6px; }
+body.editing .caption .tag { padding: 2px 9px; font-size: 12px; }
+
+.tag-btn { display: none; }
+body.editing .tag-btn {
+  display: block;
+  min-width: 64px;
+  min-height: 36px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--ink) 8%, transparent);
+  color: var(--ink);
+  font: 600 14px var(--sans);
+  cursor: pointer;
+}
+.tag-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* tag picker / manager sheets */
+.sheet .hint { margin: 0; color: var(--muted); font-size: 14px; }
+.tag-picker, .tag-manage { margin-bottom: 16px; }
+.tag-picker .chips { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 18px; }
+.sheet .chip {
+  width: auto;
+  min-height: 48px;
+  padding: 0 18px;
+  border: 1.5px solid color-mix(in srgb, var(--ink) 22%, transparent);
+  border-radius: 24px;
+  background: var(--surface);
+  color: var(--ink);
+  font: 600 17px var(--sans);
+}
+.sheet .chip[aria-pressed="true"] { border-color: var(--accent); background: var(--accent); color: #fff; }
+.sheet .chip[aria-pressed="true"]::before { content: "✓ "; }
+.tag-add { display: flex; gap: 8px; margin-bottom: 8px; }
+.tag-add input {
+  flex: 1;
+  min-width: 0;
+  min-height: 48px;
+  padding: 0 14px;
+  border: 1.5px solid color-mix(in srgb, var(--ink) 22%, transparent);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--ink);
+  font: 16px var(--sans); /* 16px stops iOS zooming on focus */
+}
+.sheet .tag-add button { width: auto; min-height: 48px; padding: 0 20px; background: color-mix(in srgb, var(--ink) 8%, transparent); color: var(--ink); }
+.sheet .link { width: auto; min-height: 44px; padding: 0; background: none; color: var(--accent); font-weight: 500; text-decoration: underline; text-underline-offset: 4px; }
+.tag-row { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 0.5px solid var(--line); }
+.tag-row .tag { margin-right: auto; font-size: 16px; }
+.sheet .tag-row button { width: auto; min-height: 44px; padding: 0 14px; background: color-mix(in srgb, var(--ink) 7%, transparent); color: var(--ink); font-size: 15px; }
+.sheet .tag-row .delete { color: var(--accent); }

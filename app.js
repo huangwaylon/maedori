@@ -1,11 +1,12 @@
 // 前撮り メモ — reference clips and photos with notes, stored in our own Cloudflare Worker (D1 + R2).
-// View mode (default) is read-only and needs nothing. Edit mode asks once for the passcode, then lets you
-// write notes, drag rows by the grip (or ↑/↓ on a focused grip) to reorder, and upload photos/videos.
+// View mode (default) needs nothing to look; marking a shot 撮影済み asks to confirm (and for the passcode once).
+// Edit mode asks once for the passcode, then lets you write notes, drag rows by the grip (or ↑/↓ on a focused
+// grip) to reorder, send a row to another section with 移動, and upload photos/videos.
 "use strict";
 
 (() => {
   const API = window.MAEDORI_API; // set in index.html
-  const ASSET_V = "11"; // keep in step with ?v= in index.html so phones fetch updated repo files
+  const ASSET_V = "12"; // keep in step with ?v= in index.html so phones fetch updated repo files
   const CACHE_KEY = "maedori:cache";
   const PASS_KEY = "maedori:passcode";
   const COLLAPSED_KEY = "maedori:collapsed";
@@ -34,7 +35,11 @@
   const sectionEls = Object.create(null); // section -> <section>
   const UNSYNCED_KEY = "maedori:unsynced";
   const unsynced = Object.assign(Object.create(null), readJSON(UNSYNCED_KEY) || {}); // notes typed here, not saved yet
-  let data = loadCache(); // { sections: [names], items: [{ id, kind, section, note, w, h, start, end, media, poster }] }
+  const UNSYNCED_DONE_KEY = "maedori:unsyncedDone";
+  const unsyncedDone = Object.assign(Object.create(null), readJSON(UNSYNCED_DONE_KEY) || {}); // 撮影済み set here, not saved yet
+  const UNSYNCED_TAGS_KEY = "maedori:unsyncedTags";
+  const unsyncedTags = Object.assign(Object.create(null), readJSON(UNSYNCED_TAGS_KEY) || {}); // item id -> [tag ids], not saved yet
+  let data = loadCache(); // { sections: [names], tags: [{ id, name }], items: [{ id, kind, section, note, done, tags: [tag ids], w, h, start, end, media, poster }] }
   let orderDirty = false;
   let editing = false;
   let drag = null;
@@ -52,7 +57,15 @@
     }
   }
 
-  const saveUnsynced = () => localStorage.setItem(UNSYNCED_KEY, JSON.stringify(unsynced));
+  const saveUnsynced = () => {
+    localStorage.setItem(UNSYNCED_KEY, JSON.stringify(unsynced));
+    localStorage.setItem(UNSYNCED_DONE_KEY, JSON.stringify(unsyncedDone));
+    localStorage.setItem(UNSYNCED_TAGS_KEY, JSON.stringify(unsyncedTags));
+  };
+  const tagsOf = (item) => (item.id in unsyncedTags ? unsyncedTags[item.id] : item.tags || []);
+  const allTags = () => data.tags || [];
+  // a change made on this phone wins until it has been saved
+  const isDone = (item) => (item.id in unsyncedDone ? unsyncedDone[item.id] : !!item.done);
 
   function loadCache() {
     const d = readJSON(CACHE_KEY);
@@ -81,6 +94,12 @@
     }
     if (!res.ok) throw Object.assign(new Error((await res.json().catch(() => ({}))).error || `HTTP ${res.status}`), { status: res.status });
     return res.json();
+  }
+
+  // the passcode was rejected (changed on the server): leave edit mode, keep pending edits for after re-entry
+  function passcodeLost() {
+    setStatus("パスコードが変わりました。編集でもう一度入力してください", { warn: true });
+    if (editing) setEditing(false, { save: false });
   }
 
   // ---------- render ----------
@@ -124,12 +143,16 @@
         ? `<video muted loop playsinline preload="none"></video>`
         : `<img class="still" alt="" loading="lazy" decoding="async">`;
     card.innerHTML =
-      `<div class="photo">${media}<img class="thumb" alt="" loading="lazy" decoding="async"></div>` +
+      `<div class="photo"><div class="frame">${media}<span class="stamp" aria-hidden="true">撮影済</span></div>` +
+      `<img class="thumb" alt="" loading="lazy" decoding="async"></div>` +
       `<div class="caption"><span class="num"></span><p class="note"></p>` +
       `<textarea rows="1" placeholder="メモを追加" aria-label="メモ"></textarea>` +
-      `<span class="time"></span>` +
+      `<div class="tags"></div>` +
+      `<span class="time"></span><span class="row-actions"><button class="tag-btn" type="button">タグ</button>` +
+      `<button class="move" type="button">移動</button>` +
       (item.id.startsWith("u") ? `<button class="remove" type="button">削除</button>` : "") +
-      `</div><button class="grip" type="button" aria-label="並べ替え（ドラッグ、または↑↓キー）">${GRIP_SVG}</button>`;
+      `</span></div><button class="done-btn" type="button"></button>` +
+      `<button class="grip" type="button" aria-label="並べ替え（ドラッグ、または↑↓キー）">${GRIP_SVG}</button>`;
     const still = item.poster || (item.kind === "image" ? item.media : "");
     card.dataset.poster = still;
     if (still) card.querySelector(".thumb").src = mediaUrl(still);
@@ -141,9 +164,11 @@
         // remember a deliberate pause, so scrolling back doesn't restart it
         if (video.paused) {
           delete video.dataset.userPaused;
+          video.dataset.userPlayed = "1"; // lets a 撮影済み clip play when tapped
           video.play().catch(() => {});
         } else {
           video.dataset.userPaused = "1";
+          delete video.dataset.userPlayed;
           video.pause();
         }
       });
@@ -157,6 +182,10 @@
     if (item.start != null) card.querySelector(".time").textContent = `元動画 ${fmt(item.start)}–${fmt(item.end)}`;
 
     const box = card.querySelector("textarea");
+    if (item.id in unsynced) {
+      box.value = unsynced[item.id]; // a card rebuilt (e.g. its section was renamed) keeps the unsaved note
+      setNote(card, box.value.trim() ? box.value : "");
+    }
     box.addEventListener("input", () => {
       unsynced[item.id] = box.value;
       saveUnsynced();
@@ -169,6 +198,9 @@
     box.addEventListener("blur", flush);
 
     card.querySelector(".remove")?.addEventListener("click", () => removeItem(item.id));
+    card.querySelector(".done-btn").addEventListener("click", () => confirmDone(item.id));
+    card.querySelector(".move").addEventListener("click", () => chooseSection(item.id));
+    card.querySelector(".tag-btn").addEventListener("click", () => chooseTags(item.id));
 
     const grip = card.querySelector(".grip");
     // touch: the most reliable way to drag on iPhone Safari (preventDefault stops the page scrolling)
@@ -208,7 +240,9 @@
   function sizeMedia(el, item) {
     if (!el || !item.w || !item.h) return;
     el.style.aspectRatio = `${item.w} / ${item.h}`;
-    el.style.width = `min(100%, calc(72vh * ${(item.w / item.h).toFixed(4)}))`;
+    const thumb = el.closest(".card")?.querySelector(".thumb");
+    if (thumb) thumb.style.aspectRatio = `${item.w} / ${item.h}`; // edit-mode thumbnail keeps the clip's shape
+    el.parentElement.style.width = `min(100%, calc(72vh * ${(item.w / item.h).toFixed(4)}))`; // the .frame, so the stamp sits on the picture
   }
 
   function refreshMedia(card, item) {
@@ -231,12 +265,56 @@
     for (const [name, list] of Object.entries(lists)) {
       const children = [...list.children];
       children.forEach((card, i) => (card.querySelector(".num").textContent = String(i + 1).padStart(2, "0")));
-      sectionEls[name].querySelector(".count").textContent = `${children.length}枚`;
+      const total = children.length;
+      const done = children.filter((c) => c.classList.contains("done")).length;
+      sectionEls[name].querySelector(".count").textContent = done ? `${done}/${total} 撮影済み` : `${total}枚`;
+      sectionEls[name].classList.toggle("complete", total > 0 && done === total);
+      sectionEls[name].style.setProperty("--p", `${total ? (done / total) * 100 : 0}%`);
     }
+  }
+
+  // tag chips, in the shared list's order
+  function showTags(card, ids) {
+    const names = allTags().filter((t) => ids.includes(t.id)).map((t) => t.name);
+    const el = card.querySelector(".tags");
+    const key = JSON.stringify(names);
+    if (el.dataset.key === key) return;
+    el.dataset.key = key;
+    el.replaceChildren(
+      ...names.map((name) => {
+        const chip = document.createElement("span");
+        chip.className = "tag";
+        chip.textContent = name;
+        return chip;
+      })
+    );
+  }
+
+  function showDone(card, on) {
+    card.classList.toggle("done", on);
+    const btn = card.querySelector(".done-btn");
+    const label = on ? "未撮影に戻す" : "撮影済みにする";
+    if (btn.textContent !== label) btn.textContent = label;
   }
 
   // Build/refresh the page from `data`, never clobbering what is being typed or dragged here
   function render() {
+    for (const name of Object.keys(sectionEls)) {
+      if (data.sections.includes(name) || lists[name].contains(drag?.card)) continue;
+      for (const card of lists[name].children) {
+        const v = card.querySelector("video");
+        if (v) {
+          observer.unobserve(v);
+          nearby.unobserve(v);
+          visible.delete(v);
+          v.pause();
+        }
+        delete cards[card.dataset.id]; // rebuilt below in their new section
+      }
+      sectionEls[name].remove();
+      delete sectionEls[name];
+      delete lists[name];
+    }
     for (const name of data.sections) ensureSection(name);
     data.sections.forEach((name) => main.append(sectionEls[name])); // keeps section order
     const ids = new Set(data.items.map((i) => i.id));
@@ -268,6 +346,9 @@
     }
     for (const item of data.items) {
       const card = cards[item.id];
+      if (!card.parentElement && card !== drag?.card) lists[item.section]?.append(card); // new/rebuilt while an unsaved reorder waits
+      showDone(card, isDone(item));
+      showTags(card, tagsOf(item));
       const box = card.querySelector("textarea");
       if (item.id in unsynced || document.activeElement === box) continue;
       setNote(card, item.note);
@@ -302,6 +383,7 @@
         if (e.isIntersecting) visible.add(e.target);
         else {
           visible.delete(e.target);
+          delete e.target.dataset.userPlayed;
           e.target.pause();
         }
       }
@@ -326,8 +408,205 @@
 
   function syncPlayback() {
     for (const v of visible) {
-      if (editing || drag || v.dataset.userPaused) v.pause();
+      if (editing || drag || v.dataset.userPaused || (v.closest(".card.done") && !v.dataset.userPlayed)) v.pause(); // a still frame reads as finished
       else if (v.paused) v.play().catch(() => {}); // autoplay can be refused (Low Power Mode); tap plays
+    }
+  }
+
+  // ---------- sheet: a bottom sheet that asks before anything happens ----------
+  let sheet = null;
+  function openSheet({ title, thumb, actions = [], body, close = "やめる", kind = "", redraw }) {
+    closeSheet();
+    const opened = performance.now();
+    const settled = () => performance.now() - opened >= 450; // the 2nd tap of a double-tap must not confirm
+    const backdrop = document.createElement("div");
+    backdrop.className = "sheet-backdrop";
+    const box = document.createElement("div");
+    box.className = "sheet";
+    box.tabIndex = -1;
+    box.setAttribute("role", "dialog");
+    box.setAttribute("aria-modal", "true");
+    box.setAttribute("aria-label", title);
+    box.innerHTML = `<div class="sheet-head"><h3></h3></div><div class="sheet-actions"></div>`;
+    box.querySelector("h3").textContent = title;
+    if (thumb) {
+      const img = document.createElement("img");
+      img.alt = "";
+      img.src = thumb;
+      box.querySelector(".sheet-head").prepend(img);
+    }
+    if (body) box.querySelector(".sheet-head").after(body);
+    const row = box.querySelector(".sheet-actions");
+    for (const { label, kind = "choice", run } of [...actions, { label: close, kind: "secondary" }]) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = kind;
+      b.textContent = label;
+      b.addEventListener("click", () => {
+        if (!settled()) return;
+        closeSheet();
+        run?.();
+      });
+      row.append(b);
+    }
+    backdrop.addEventListener("click", () => settled() && closeSheet());
+    backdrop.addEventListener("touchmove", (e) => e.preventDefault(), { passive: false });
+    sheet = { backdrop, box, back: document.activeElement, kind, redraw };
+    document.body.classList.add("sheet-open");
+    document.body.append(backdrop, box);
+    box.focus({ preventScroll: true }); // nothing pre-selected, so Enter/Space on open does nothing
+  }
+  function closeSheet() {
+    if (!sheet) return;
+    sheet.backdrop.remove();
+    sheet.box.remove();
+    document.body.classList.remove("sheet-open");
+    sheet.back?.focus?.({ preventScroll: true });
+    sheet = null;
+  }
+  addEventListener("keydown", (e) => {
+    if (sheet && e.key === "Escape") closeSheet();
+  });
+  const thumbOf = (id) => (cards[id]?.dataset.poster ? mediaUrl(cards[id].dataset.poster) : "");
+
+  // ---------- 撮影済み (from the main page) ----------
+  function confirmDone(id) {
+    const on = !cards[id].classList.contains("done");
+    openSheet({
+      title: on ? "この写真を撮影済みにしますか？" : "未撮影に戻しますか？",
+      thumb: thumbOf(id),
+      actions: [{ label: on ? "撮影済みにする" : "戻す", kind: "primary", run: () => cards[id] && setDone(id, on) }],
+    });
+  }
+  async function setDone(id, on) {
+    if (!localStorage.getItem(PASS_KEY) && !(await askPasscode())) return; // saving needs the passcode (asked once)
+    if (!cards[id]) return;
+    unsyncedDone[id] = on;
+    saveUnsynced();
+    showDone(cards[id], on);
+    renumber();
+    syncPlayback();
+    setStatus("保存中…");
+    flush();
+  }
+
+  // ---------- 移動: send a row to another section (edit mode) ----------
+  function chooseSection(id) {
+    const card = cards[id];
+    const here = card.parentElement.dataset.section;
+    openSheet({
+      title: "どこへ移動しますか？",
+      thumb: thumbOf(id),
+      actions: data.sections
+        .filter((name) => name !== here)
+        .map((name) => ({
+          label: name,
+          run: () => {
+            if (cards[id] !== card || !lists[name]) return; // deleted/renamed on another phone meanwhile
+            lists[name].append(card);
+            commitOrder();
+            setStatus(`「${name}」へ移動しました`, { fade: true });
+          },
+        })),
+    });
+  }
+
+  // ---------- タグ (edit mode) ----------
+  function chooseTags(id) {
+    const current = () => data.items.find((i) => i.id === id) || { id, tags: [] }; // `data` is replaced by every poll
+    if (!cards[id]) return;
+    const body = document.createElement("div");
+    body.className = "tag-picker";
+    const chips = document.createElement("div");
+    chips.className = "chips";
+    const draw = () => {
+      const on = tagsOf(current());
+      chips.replaceChildren(
+        ...allTags().map((t) => {
+          const b = document.createElement("button");
+          b.type = "button";
+          b.className = "chip";
+          b.textContent = t.name;
+          b.setAttribute("aria-pressed", String(on.includes(t.id)));
+          b.addEventListener("click", () => toggleTag(current(), t.id, draw));
+          return b;
+        })
+      );
+      if (!allTags().length) chips.innerHTML = `<p class="hint">まだタグがありません。下で作成できます。</p>`;
+    };
+    draw();
+    const add = document.createElement("form");
+    add.className = "tag-add";
+    add.innerHTML = `<input type="text" maxlength="30" placeholder="新しいタグ（例：顔アップ）" aria-label="新しいタグ" enterkeyhint="done"><button type="submit">追加</button>`;
+    add.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const input = add.querySelector("input");
+      const name = input.value.trim();
+      if (!name) return;
+      try {
+        writeGen++; // a poll that started before this must not undo it
+        const tag = await api("/api/tags", { method: "POST", body: { name } });
+        if (!allTags().some((t) => t.id === tag.id)) data.tags = [...allTags(), { id: tag.id, name: tag.name }];
+        input.value = "";
+        if (!tagsOf(current()).includes(tag.id)) toggleTag(current(), tag.id, draw);
+        else draw();
+      } catch (err) {
+        if (err.auth) passcodeLost();
+        else setStatus("タグを作れませんでした", { warn: true });
+      }
+    });
+    const manage = document.createElement("button");
+    manage.type = "button";
+    manage.className = "link";
+    manage.textContent = "タグの名前変更・削除";
+    manage.addEventListener("click", manageTags);
+    body.append(chips, add, manage);
+    openSheet({ title: "タグを選ぶ", thumb: thumbOf(id), body, close: "完了", kind: "tags", redraw: draw });
+  }
+
+  function toggleTag(item, tagId, redraw) {
+    const now = tagsOf(item);
+    unsyncedTags[item.id] = now.includes(tagId) ? now.filter((t) => t !== tagId) : [...now, tagId];
+    saveUnsynced();
+    if (cards[item.id]) showTags(cards[item.id], unsyncedTags[item.id]);
+    redraw?.();
+    setStatus("保存中…");
+    flush();
+  }
+
+  function manageTags() {
+    const body = document.createElement("div");
+    body.className = "tag-manage";
+    for (const t of allTags()) {
+      const row = document.createElement("div");
+      row.className = "tag-row";
+      row.innerHTML = `<span class="tag"></span><button type="button" class="rename">名前変更</button><button type="button" class="delete">削除</button>`;
+      row.querySelector(".tag").textContent = t.name;
+      row.querySelector(".rename").addEventListener("click", () => tagOp(async () => {
+        const name = prompt("新しい名前", t.name)?.trim();
+        if (!name || name === t.name) return false;
+        await api(`/api/tags/${t.id}`, { method: "PUT", body: { name } });
+      }));
+      row.querySelector(".delete").addEventListener("click", () => tagOp(async () => {
+        if (!confirm(`タグ「${t.name}」を削除しますか？（付いている写真からも外れます）`)) return false;
+        await api(`/api/tags/${t.id}`, { method: "DELETE" });
+      }));
+      body.append(row);
+    }
+    if (!allTags().length) body.innerHTML = `<p class="hint">まだタグがありません。</p>`;
+    openSheet({ title: "タグの管理", body, close: "閉じる", kind: "tag-manage" });
+  }
+
+  async function tagOp(run) {
+    try {
+      writeGen++; // a poll that started before this must not undo it
+      if ((await run()) === false) return;
+      writeGen++;
+      show(await api("/api/data"));
+      if (sheet?.kind === "tag-manage") manageTags(); // redraw with the new names (unless another sheet was opened)
+    } catch (err) {
+      if (err.auth) passcodeLost();
+      else setStatus(err.status === 409 ? "同じ名前のタグがあります" : "変更できませんでした", { warn: true });
     }
   }
 
@@ -358,6 +637,7 @@
 
   async function setEditing(on, { save = true } = {}) {
     if (on && !localStorage.getItem(PASS_KEY) && !(await askPasscode())) return;
+    closeSheet();
     editing = on;
     document.body.classList.toggle("editing", on);
     modeBtn.textContent = on ? "完了" : "編集";
@@ -493,15 +773,23 @@
     data = remote;
     localStorage.setItem(CACHE_KEY, JSON.stringify(data));
     render();
+    sheet?.redraw?.(); // e.g. the tag picker shows tags/choices made on other phones
   }
 
-  const hasPending = () => Object.keys(unsynced).length > 0 || orderDirty;
+  const hasPending = () =>
+    Object.keys(unsynced).length > 0 || Object.keys(unsyncedDone).length > 0 || Object.keys(unsyncedTags).length > 0 || orderDirty;
 
   async function writeUnsynced() {
-    if (!localStorage.getItem(PASS_KEY)) return; // nothing can be saved until the passcode is entered again
+    if (!localStorage.getItem(PASS_KEY)) {
+      // nothing can be saved until the passcode is entered again
+      if (hasPending()) setStatus("未保存の変更があります。編集でパスコードを入力してください", { warn: true });
+      return;
+    }
     const batch = { ...unsynced };
+    const doneBatch = { ...unsyncedDone };
+    const tagBatch = { ...unsyncedTags };
     const sendOrder = orderDirty && !drag ? domOrder() : null;
-    if (!Object.keys(batch).length && !sendOrder) return;
+    if (!Object.keys(batch).length && !Object.keys(doneBatch).length && !Object.keys(tagBatch).length && !sendOrder) return;
     writeGen++;
     try {
       let rejected = false;
@@ -514,14 +802,46 @@
         }
         if (unsynced[id] === note) delete unsynced[id]; // typed more meanwhile? the next flush sends it
       }
+      for (const [id, on] of Object.entries(doneBatch)) {
+        try {
+          await api(`/api/done/${encodeURIComponent(id)}`, { method: "PUT", body: { done: on } });
+        } catch (err) {
+          if (err.auth || !err.status || err.status >= 500) throw err;
+          rejected = true; // the item was deleted on another phone
+        }
+        if (unsyncedDone[id] === on) {
+          delete unsyncedDone[id];
+          const item = data.items.find((i) => i.id === id);
+          if (item) item.done = on;
+        }
+      }
+      for (const [id, tags] of Object.entries(tagBatch)) {
+        try {
+          await api(`/api/items/${encodeURIComponent(id)}/tags`, { method: "PUT", body: { tags } });
+        } catch (err) {
+          if (err.auth || !err.status || err.status >= 500) throw err;
+          rejected = true;
+        }
+        if (unsyncedTags[id] === tags) {
+          delete unsyncedTags[id]; // toggled again meanwhile? that newer list is sent next
+          const item = data.items.find((i) => i.id === id);
+          if (item) item.tags = tags;
+        }
+      }
       saveUnsynced();
       if (sendOrder) {
-        await api("/api/order", { method: "PUT", body: { order: sendOrder } });
-        if (!drag && JSON.stringify(domOrder()) === JSON.stringify(sendOrder)) orderDirty = false;
+        try {
+          await api("/api/order", { method: "PUT", body: { order: sendOrder } });
+          if (!drag && JSON.stringify(domOrder()) === JSON.stringify(sendOrder)) orderDirty = false;
+        } catch (err) {
+          if (err.auth || !err.status || err.status >= 500) throw err;
+          orderDirty = false; // e.g. a section was renamed meanwhile: don't retry forever
+          rejected = true;
+        }
       }
       writeGen++;
       if (!hasPending()) {
-        if (rejected) setStatus("一部のメモは保存できませんでした（項目が削除されています）", { warn: true });
+        if (rejected) setStatus("一部の変更は保存できませんでした（項目が削除されています）", { warn: true });
         else setStatus("保存しました", { fade: true });
         show(await api("/api/data"));
       }
@@ -529,6 +849,7 @@
       if (err.auth) {
         setStatus("パスコードが変わりました。編集でもう一度入力してください", { warn: true });
         if (editing) setEditing(false, { save: false }); // keep the edits; they are sent after re-entry
+        else if (Object.keys(unsyncedDone).length && !passDialog.open) askPasscode().then((ok) => ok && flush()); // 撮影済み from the main page
       } else setStatus("オフライン・つながり次第保存します", { warn: true });
     }
   }
@@ -545,7 +866,8 @@
     const gen = writeGen;
     try {
       const remote = await api("/api/data");
-      if (gen === writeGen && !hasPending() && !drag) show(remote);
+      // pending notes/撮影済み are layered over the server data by render(), so other phones' changes still show
+      if (gen === writeGen && !orderDirty && !drag) show(remote);
       if (statusEl.classList.contains("warn") && !hasPending()) setStatus("");
     } catch {
       setStatus("オフライン・最新の内容を読み込めません", { warn: true });
@@ -566,6 +888,7 @@
     const section = await pickSection(files.length);
     if (!section) return;
     for (const [i, file] of files.entries()) {
+      writeGen++;
       try {
         await uploadOne(file, section, (p) => setStatus(`アップロード中 ${i + 1}/${files.length}… ${Math.round(p * 100)}%`));
       } catch (err) {
@@ -574,6 +897,7 @@
       }
     }
     setStatus("追加しました", { fade: true });
+    writeGen++;
     show(await api("/api/data"));
     setCollapsed(section, false, false);
     const last = data.items.filter((x) => x.section === section).at(-1);
@@ -720,7 +1044,9 @@
   async function removeItem(id) {
     if (!confirm("この項目を削除しますか？")) return;
     try {
+      writeGen++;
       await api(`/api/items/${encodeURIComponent(id)}`, { method: "DELETE" });
+      writeGen++;
       show(await api("/api/data"));
     } catch (err) {
       setStatus(err.auth ? "パスコードをもう一度入力してください" : "削除できませんでした", { warn: true });
