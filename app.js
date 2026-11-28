@@ -6,7 +6,7 @@
 
 (() => {
   const API = window.MAEDORI_API; // set in index.html
-  const ASSET_V = "13"; // keep in step with ?v= in index.html so phones fetch updated repo files
+  const ASSET_V = "14"; // keep in step with ?v= in index.html so phones fetch updated repo files
   const CACHE_KEY = "maedori:cache";
   const PASS_KEY = "maedori:passcode";
   const COLLAPSED_KEY = "maedori:collapsed";
@@ -635,9 +635,33 @@
     });
   }
 
+  // Keep the same clip in view across the mode switch (the two layouts have very different heights):
+  // remember which card is at the top of the screen and how far into it, then put it back there.
+  function scrollAnchor() {
+    const line = document.querySelector(".bar").getBoundingClientRect().bottom + 60; // below the sticky section heading
+    let best = null;
+    for (const card of Object.values(cards)) {
+      if (!card.offsetParent) continue; // in a collapsed section
+      const r = card.getBoundingClientRect();
+      const d = r.top > line ? r.top - line : r.bottom < line ? line - r.bottom : 0;
+      if (!best || d < best.d) best = { card, d, r };
+    }
+    if (!best) return null;
+    const f = Math.min(1, Math.max(0, (line - best.r.top) / best.r.height));
+    return { card: best.card, f, line };
+  }
+  let lastAnchor = null; // { anchor, y }: reused if nothing scrolled since (near the page end the exact spot can't be reached)
+  function restoreAnchor(a) {
+    if (!a || !a.card.isConnected) return;
+    const r = a.card.getBoundingClientRect();
+    scrollBy({ top: r.top + a.f * r.height - a.line, behavior: "instant" });
+    lastAnchor = { anchor: a, y: scrollY };
+  }
+
   async function setEditing(on, { save = true } = {}) {
     if (on && !localStorage.getItem(PASS_KEY) && !(await askPasscode())) return;
     closeSheet();
+    const anchor = lastAnchor && Math.abs(scrollY - lastAnchor.y) < 2 ? lastAnchor.anchor : scrollAnchor();
     editing = on;
     document.body.classList.toggle("editing", on);
     modeBtn.textContent = on ? "完了" : "編集";
@@ -648,6 +672,7 @@
       document.activeElement?.blur();
       if (save) flush();
     }
+    restoreAnchor(anchor);
     if (on && hasPending()) flush(); // edits kept from before (e.g. passcode had expired)
   }
   modeBtn.addEventListener("click", () => setEditing(!editing));
