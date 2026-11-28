@@ -6,7 +6,7 @@
 
 (() => {
   const API = window.MAEDORI_API; // set in index.html
-  const ASSET_V = "12"; // keep in step with ?v= in index.html so phones fetch updated repo files
+  const ASSET_V = "13"; // keep in step with ?v= in index.html so phones fetch updated repo files
   const CACHE_KEY = "maedori:cache";
   const PASS_KEY = "maedori:passcode";
   const COLLAPSED_KEY = "maedori:collapsed";
@@ -716,6 +716,14 @@
   // Move the dragged card to wherever the finger is now
   function place() {
     const y = drag.y;
+    // over a collapsed section's heading: drop there (at the end) on release
+    const target = data.sections.find((name) => {
+      if (!lists[name]?.hidden) return false;
+      const r = sectionEls[name].querySelector(".section-head").getBoundingClientRect();
+      return y >= r.top && y <= r.bottom;
+    });
+    setDropTarget(target);
+    if (target) return;
     const all = Object.values(lists).filter((l) => !l.hidden); // can't drop into a collapsed section
     if (!all.length) return;
     let list = all.find((l) => {
@@ -753,6 +761,13 @@
     drag.raf = requestAnimationFrame(autoScroll);
   }
 
+  function setDropTarget(name) {
+    if (drag.target === name) return;
+    if (drag.target) sectionEls[drag.target]?.classList.remove("drop-target");
+    drag.target = name;
+    if (name) sectionEls[name].classList.add("drop-target");
+  }
+
   function endDrag() {
     removeEventListener("touchmove", onTouchMove);
     removeEventListener("touchend", onTouchEnd);
@@ -761,11 +776,15 @@
     removeEventListener("pointerup", onPointerEnd);
     removeEventListener("pointercancel", onPointerEnd);
     cancelAnimationFrame(drag.raf);
+    const target = drag.target;
+    if (target && lists[target]) lists[target].append(drag.card); // stays collapsed; the count shows it arrived
+    setDropTarget(undefined);
     drag.card.classList.remove("dragging");
     document.body.classList.remove("dragging");
     const changed = JSON.stringify(domOrder()) !== drag.before;
     drag = null;
     if (changed) commitOrder();
+    if (changed && target) setStatus(`「${target}」へ移動しました`, { fade: true });
   }
 
   // ---------- sync ----------
