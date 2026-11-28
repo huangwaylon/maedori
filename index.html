@@ -9,20 +9,22 @@
   <meta name="apple-mobile-web-app-title" content="前撮り">
   <title>前撮り メモ</title>
   <!-- every deploy: bump ?v= here, ASSET_V in app.js and version.json together (open apps update themselves) -->
-  <link rel="stylesheet" href="style.css?v=16">
+  <link rel="stylesheet" href="style.css?v=18">
 </head>
 <body>
   <header class="bar">
     <div class="titles">
-      <h1>前撮り メモ</h1>
+      <h1>前撮り メモ <button id="offline" type="button" hidden></button></h1>
       <p id="status" aria-live="polite"></p>
     </div>
     <div class="bar-actions">
       <button id="undo" type="button" aria-label="元に戻す" title="元に戻す (⌘Z)" hidden>
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 14L4 9l5-5M4 9h10.5a5.5 5.5 0 0 1 0 11H11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span>戻す</span>
       </button>
       <button id="redo" type="button" aria-label="やり直す" title="やり直す (⇧⌘Z)" hidden>
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 14l5-5-5-5M20 9H9.5a5.5 5.5 0 0 0 0 11H13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span>やり直す</span>
       </button>
       <button id="mode" type="button" aria-pressed="false">編集</button>
     </div>
@@ -73,6 +75,6 @@
   </dialog>
 
   <script>window.MAEDORI_API = "https://maedori-api.maedori-api.workers.dev";</script>
-  <script src="app.js?v=16"></script>
+  <script src="app.js?v=18"></script>
 </body>
 </html>

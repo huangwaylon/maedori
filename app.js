@@ -6,11 +6,11 @@
 
 (() => {
   const API = window.MAEDORI_API; // set in index.html
-  const ASSET_V = "16"; // keep in step with ?v= in index.html so phones fetch updated repo files
+  const ASSET_V = "18"; // keep in step with ?v= in index.html so phones fetch updated repo files
   const CACHE_KEY = "maedori:cache";
   const PASS_KEY = "maedori:passcode";
   const COLLAPSED_KEY = "maedori:collapsed";
-  const POLL_MS = 15000;
+  const POLL_MS = 20000; // plus right away when the app is reopened and after our own changes
   const SAVE_DELAY_MS = 800;
   const EDGE_PX = 100;
   const MAX_IMAGE_PX = 2048;
@@ -40,7 +40,12 @@
   const UNSYNCED_TAGS_KEY = "maedori:unsyncedTags";
   const unsyncedTags = Object.assign(Object.create(null), readJSON(UNSYNCED_TAGS_KEY) || {}); // item id -> [tag ids], not saved yet
   let data = loadCache(); // { sections: [names], tags: [{ id, name }], items: [{ id, kind, section, note, done, tags: [tag ids], w, h, start, end, media, poster }] }
-  let orderDirty = false;
+  // our own (manual) order not saved yet: { order: {section: [ids]}, moved: [ids] } — kept across reloads
+  const PENDING_ORDER_KEY = "maedori:pendingOrder";
+  let pendingOrder = readJSON(PENDING_ORDER_KEY);
+  let orderDirty = !!pendingOrder;
+  const savePendingOrder = () =>
+    pendingOrder ? localStorage.setItem(PENDING_ORDER_KEY, JSON.stringify(pendingOrder)) : localStorage.removeItem(PENDING_ORDER_KEY);
   let editing = false;
   let drag = null;
   let writing = Promise.resolve();
@@ -74,21 +79,35 @@
   }
 
   // uploads live in the Worker (KV); the original clips/photos are files in this repo
-  const mediaUrl = (key) => (key.startsWith("uploads/") ? `${API}/media/${key}` : `${key}?v=${ASSET_V}`);
+  // repo clips change only when re-cut: bump MEDIA_V then (not on every deploy, which would re-download 15 MB)
+  const MEDIA_V = "1";
+  const STREAM_ONLY_KEY = "maedori:streamOnly"; // uploads too big to keep offline: they bypass the SW (WebKit plays them natively)
+  const streamOnly = new Set(readJSON(STREAM_ONLY_KEY) || []);
+  const mediaUrl = (key) =>
+    key.startsWith("uploads/") ? `${API}/media/${key}${streamOnly.has(key) ? "?swbypass=1" : ""}` : `${key}?m=${MEDIA_V}`;
   const fmt = (t) => `${Math.floor(t / 60)}:${(t % 60).toFixed(1).padStart(4, "0")}`;
 
-  function setStatus(text, { warn = false, fade = false } = {}) {
+  function setStatus(text, { warn = false, fade = false, ms = 2500 } = {}) {
     clearTimeout(statusTimer);
     statusEl.textContent = text;
     statusEl.classList.toggle("warn", warn);
-    if (fade) statusTimer = setTimeout(() => (statusEl.textContent = ""), 2000);
+    if (fade) statusTimer = setTimeout(() => (statusEl.textContent = ""), ms);
   }
 
-  async function api(path, { method = "GET", body, pass = localStorage.getItem(PASS_KEY) } = {}) {
+  function timeoutSignal(ms) {
+    const c = new AbortController(); // AbortSignal.timeout needs iOS 16+
+    setTimeout(() => c.abort(), ms);
+    return c.signal;
+  }
+
+  async function api(path, { method = "GET", body, pass = localStorage.getItem(PASS_KEY), timeout } = {}) {
     const headers = {};
     if (method !== "GET" && pass) headers.authorization = `Bearer ${pass}`;
     if (body !== undefined) headers["content-type"] = "application/json";
-    const res = await fetch(`${API}${path}`, { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined, cache: "no-store" });
+    const res = await fetch(`${API}${path}`, {
+      method, headers, body: body !== undefined ? JSON.stringify(body) : undefined, cache: "no-store",
+      signal: timeout ? timeoutSignal(timeout) : undefined,
+    });
     if (res.status === 401) {
       localStorage.removeItem(PASS_KEY);
       throw Object.assign(new Error("passcode"), { auth: true });
@@ -144,7 +163,7 @@
         ? `<video muted loop playsinline preload="none"></video>`
         : `<img class="still" alt="" loading="lazy" decoding="async">`;
     card.innerHTML =
-      `<div class="photo"><div class="frame">${media}<span class="stamp" aria-hidden="true">撮影済</span></div>` +
+      `<div class="group-label" aria-hidden="true"></div><div class="photo"><div class="frame">${media}<span class="stamp" aria-hidden="true">撮影済み</span></div>` +
       `<img class="thumb" alt="" loading="lazy" decoding="async"></div>` +
       `<div class="caption"><span class="num"></span><p class="note"></p><button class="done-btn" type="button"></button>` +
       `<textarea rows="1" placeholder="メモを追加" aria-label="メモ"></textarea>` +
@@ -199,7 +218,7 @@
     box.addEventListener("focus", () => (box.dataset.start = box.value));
     box.addEventListener("blur", () => {
       const was = box.dataset.start, now = box.value;
-      if (was !== undefined && now !== was) record({ label: "メモ", id: item.id, undo: () => applyNote(item.id, was), redo: () => applyNote(item.id, now) });
+      if (was !== undefined && now !== was) record({ label: "メモ", id: item.id, undo: () => applyNote(item.id, was, now), redo: () => applyNote(item.id, now, was) });
       delete box.dataset.start;
       flush();
     });
@@ -341,16 +360,7 @@
       if (!cards[item.id]) cards[item.id] = makeCard(item);
       else refreshMedia(cards[item.id], item); // e.g. a video's poster arrived after the card was made
     }
-    if (!drag && !orderDirty) {
-      for (const name of data.sections) {
-        const list = lists[name];
-        data.items
-          .filter((i) => i.section === name)
-          .forEach((item, i) => {
-            if (list.children[i] !== cards[item.id]) list.insertBefore(cards[item.id], list.children[i] || null);
-          });
-      }
-    }
+    layout();
     for (const item of data.items) {
       const card = cards[item.id];
       if (!card.parentElement && card !== drag?.card) lists[item.section]?.append(card); // new/rebuilt while an unsaved reorder waits
@@ -364,7 +374,6 @@
         grow(box);
       }
     }
-    resort();
     renumber();
     syncPlayback();
     emptyEl.hidden = data.items.length > 0;
@@ -387,26 +396,89 @@
     });
     return best;
   }
-  function resort() {
-    if (drag) return; // never move things under a finger
-    for (const list of Object.values(lists)) {
-      const now = [...list.children];
-      const rank = new Map(now.map((c) => [c, tagRank(c.dataset.id)]));
-      const sorted = [...now].sort((a, b) => rank.get(a) - rank.get(b)); // Array sort is stable
-      if (sorted.some((c, i) => c !== now[i])) for (const c of sorted) list.append(c);
+  // Our own order: the server's, with any unsaved local order on top (ids that vanished are skipped,
+  // new ones keep their server place at the end)
+  function manualOrder() {
+    const order = {};
+    const placed = new Set();
+    for (const name of data.sections) {
+      order[name] = (pendingOrder?.order[name] || []).filter((id) => cards[id] && !placed.has(id) && placed.add(id));
     }
+    for (const item of data.items) if (!placed.has(item.id) && order[item.section]) order[item.section].push(item.id);
+    return order;
   }
 
-  function commitOrder(before) {
-    resort(); // a clip dropped into another tag's group goes back to its own group
-    if (before) {
-      const after = domOrder();
-      if (JSON.stringify(after) !== JSON.stringify(before)) record({ label: "並べ替え", undo: () => applyOrder(before), redo: () => applyOrder(after) });
+  // Put the cards on the page: our own order in edit mode (so a drag does exactly what the finger did),
+  // grouped by tag in view mode (stable, so our order decides inside each group), with a small group label.
+  function layout() {
+    if (drag) return; // never move things under a finger
+    const order = manualOrder();
+    for (const name of data.sections) {
+      const list = lists[name];
+      let ids = order[name];
+      const rank = new Map(ids.map((id) => [id, editing ? 0 : tagRank(id)]));
+      if (!editing) ids = [...ids].sort((a, b) => rank.get(a) - rank.get(b)); // Array sort is stable
+      const grouped = !editing && new Set(rank.values()).size > 1;
+      ids.forEach((id, i) => {
+        const card = cards[id];
+        if (list.children[i] !== card) list.insertBefore(card, list.children[i] || null);
+        const r = rank.get(id);
+        const label = grouped && (i === 0 || rank.get(ids[i - 1]) !== r) ? (r === Infinity ? "タグなし" : allTags()[r].name) : "";
+        const el = card.querySelector(".group-label");
+        if (el.textContent !== label) el.textContent = label;
+      });
     }
     renumber();
+  }
+
+  const posOf = (card) => ({ section: card.parentElement?.dataset.section, next: card.nextElementSibling?.dataset.id || null });
+
+  // A card was moved on the page (edit mode): keep the new order, remember which card moved, save it
+  function commitOrder(card, from) {
+    const to = posOf(card);
+    pendingOrder = {
+      order: domOrder(),
+      moved: [...new Set([...(pendingOrder?.moved || []), card.dataset.id])],
+      touched: [...new Set([...(pendingOrder?.touched || []), from?.section, to.section].filter(Boolean))],
+    };
     orderDirty = true;
+    savePendingOrder();
+    const id = card.dataset.id;
+    if (from && (from.section !== to.section || from.next !== to.next)) {
+      // undo moves just this card back (not a whole-page snapshot, which would revert other phones' moves)
+      record({ label: "並べ替え", id, undo: () => applyMove(id, from), redo: () => applyMove(id, to) });
+    }
+    renumber();
     setStatus("保存中…");
     flush();
+  }
+
+  // Move one card to { section, next } in our own order (works in either mode; false if impossible)
+  function applyMove(id, { section, next }) {
+    if (!cards[id] || !lists[section]) return false;
+    const order = manualOrder();
+    let was = null;
+    for (const [name, ids] of Object.entries(order)) {
+      const i = ids.indexOf(id);
+      if (i >= 0) {
+        ids.splice(i, 1);
+        was = name;
+      }
+    }
+    const ids = order[section];
+    const at = next ? ids.indexOf(next) : -1;
+    ids.splice(at >= 0 ? at : ids.length, 0, id);
+    pendingOrder = {
+      order,
+      moved: [...new Set([...(pendingOrder?.moved || []), id])],
+      touched: [...new Set([...(pendingOrder?.touched || []), section, was].filter(Boolean))],
+    };
+    orderDirty = true;
+    savePendingOrder();
+    layout();
+    setStatus("保存中…");
+    flush();
+    return true;
   }
 
   // ---------- playback: only clips on screen, only in view mode ----------
@@ -513,8 +585,8 @@
     });
   }
   async function setDone(id, on) {
-    if (!localStorage.getItem(PASS_KEY) && !(await askPasscode())) return; // saving needs the passcode (asked once)
-    if (!cards[id]) return;
+    if (!localStorage.getItem(PASS_KEY) && !(await askPasscode())) return false; // saving needs the passcode (asked once)
+    if (!cards[id]) return false;
     const was = cards[id].classList.contains("done");
     if (was !== on) record({ label: on ? "撮影済み" : "未撮影に戻す", id, undo: () => setDone(id, was), redo: () => setDone(id, on) });
     unsyncedDone[id] = on;
@@ -524,6 +596,7 @@
     syncPlayback();
     setStatus("保存中…");
     flush();
+    return true;
   }
 
   // ---------- 移動: send a row to another section (edit mode) ----------
@@ -539,9 +612,9 @@
           label: name,
           run: () => {
             if (cards[id] !== card || !lists[name]) return; // deleted/renamed on another phone meanwhile
-            const before = domOrder();
+            const from = posOf(card);
             lists[name].append(card);
-            commitOrder(before);
+            commitOrder(card, from);
             setStatus(`「${name}」へ移動しました`, { fade: true });
           },
         })),
@@ -598,14 +671,23 @@
     manage.textContent = "タグの名前変更・削除";
     manage.addEventListener("click", manageTags);
     body.append(chips, add, manage);
-    openSheet({ title: "タグを選ぶ", thumb: thumbOf(id), body, close: "完了", kind: "tags", redraw: draw });
+    openSheet({ title: "タグを選ぶ", thumb: thumbOf(id), body, close: "閉じる", kind: "tags", redraw: draw });
+    body.insertAdjacentHTML("beforeend", `<p class="hint">ふだんの画面では、タグごとにまとまって並びます。</p>`);
   }
 
   function toggleTag(item, tagId, redraw) {
     const now = tagsOf(item);
     applyTags(item.id, now.includes(tagId) ? now.filter((t) => t !== tagId) : [...now, tagId]);
-    const next = unsyncedTags[item.id];
-    record({ label: "タグ", id: item.id, undo: () => applyTags(item.id, now), redo: () => applyTags(item.id, next) });
+    const on = !now.includes(tagId);
+    const setTag = (want) => {
+      const cur = data.items.find((i) => i.id === item.id);
+      if (!cur || !allTags().some((t) => t.id === tagId)) return false; // item or tag deleted since
+      const tags = tagsOf(cur);
+      if (tags.includes(tagId) === want) return true;
+      applyTags(item.id, want ? [...tags, tagId] : tags.filter((t) => t !== tagId)); // only this tag: others' changes stay
+      return true;
+    };
+    record({ label: "タグ", id: item.id, undo: () => setTag(!on), redo: () => setTag(on) });
     redraw?.();
   }
 
@@ -613,8 +695,7 @@
     unsyncedTags[id] = tags;
     saveUnsynced();
     if (cards[id]) showTags(cards[id], tags);
-    resort();
-    renumber();
+    layout();
     sheet?.redraw?.();
     setStatus("保存中…");
     flush();
@@ -630,12 +711,14 @@
         `<span class="tag"></span><button type="button" class="up" aria-label="上へ">↑</button><button type="button" class="down" aria-label="下へ">↓</button>` +
         `<button type="button" class="rename">名前変更</button><button type="button" class="delete">削除</button>`;
       row.querySelector(".tag").textContent = t.name;
-      const i = allTags().indexOf(t);
       for (const [cls, d] of [["up", -1], ["down", 1]]) {
         const b = row.querySelector(`.${cls}`);
-        b.disabled = !allTags()[i + d];
+        const i0 = allTags().findIndex((x) => x.id === t.id);
+        b.disabled = !allTags()[i0 + d];
         b.addEventListener("click", () => tagOp(async () => {
-          const ids = allTags().map((x) => x.id);
+          const ids = allTags().map((x) => x.id); // the list as it is now (a poll may have changed it)
+          const i = ids.indexOf(t.id);
+          if (i < 0 || !ids[i + d]) return false;
           [ids[i], ids[i + d]] = [ids[i + d], ids[i]];
           await api("/api/tag-order", { method: "PUT", body: { ids } });
         }));
@@ -652,7 +735,8 @@
       body.append(row);
     }
     if (!allTags().length) body.innerHTML = `<p class="hint">まだタグがありません。</p>`;
-    openSheet({ title: "タグの管理", body, close: "閉じる", kind: "tag-manage" });
+    const drawn = JSON.stringify(allTags());
+    openSheet({ title: "タグの管理", body, close: "閉じる", kind: "tag-manage", redraw: () => JSON.stringify(allTags()) !== drawn && manageTags() });
     body.insertAdjacentHTML("afterbegin", `<p class="hint">各セクションの中は、この順番のタグごとにまとまって並びます。</p>`);
   }
 
@@ -673,7 +757,7 @@
   const undoBtn = document.getElementById("undo");
   const redoBtn = document.getElementById("redo");
   const past = [], future = [];
-  let replaying = false;
+  let replaying = false, stepping = false;
 
   function record(entry) {
     if (replaying) return; // the undo/redo itself is not a new step
@@ -684,7 +768,8 @@
   }
 
   function showHistory() {
-    undoBtn.hidden = redoBtn.hidden = !past.length && !future.length;
+    undoBtn.hidden = !past.length && !future.length;
+    redoBtn.hidden = !future.length;
     undoBtn.disabled = !past.length;
     redoBtn.disabled = !future.length;
     undoBtn.title = past.length ? `元に戻す：${past.at(-1).label}` : "元に戻す";
@@ -692,21 +777,28 @@
   }
 
   async function step(from, to, verb) {
-    if (drag || passDialog.open) return;
+    if (drag || passDialog.open || stepping) return;
     if (sheet) closeSheet();
     document.activeElement?.blur(); // a note being typed becomes its own step first
     const entry = from.pop();
     if (!entry) return;
-    replaying = true;
+    stepping = replaying = true;
+    let result;
     try {
-      await entry[verb === "元に戻しました" ? "undo" : "redo"]();
+      result = await entry[verb === "元に戻しました" ? "undo" : "redo"]();
     } finally {
-      replaying = false;
+      stepping = replaying = false;
+    }
+    if (result !== true) {
+      // dropped from the history, so the next tap does something
+      showHistory();
+      setStatus(result === "changed" ? "元に戻せませんでした（ほかの端末で変更されています）" : "元に戻せませんでした（写真が削除されたか、キャンセルされました）", { warn: true });
+      return;
     }
     to.push(entry);
     showHistory();
     await writing; // let "保存しました" pass first, then say what was undone
-    setStatus(`${verb}（${entry.label}）`, { fade: true });
+    setStatus(`${verb}（${entry.label}）`, { fade: true, ms: 4000 });
     const card = entry.id && cards[entry.id];
     if (card?.offsetParent) {
       const r = card.getBoundingClientRect();
@@ -726,9 +818,13 @@
     else step(past, future, "元に戻しました");
   });
 
-  function applyNote(id, text) {
+  // put a note back to `text`, but only if it still reads `expect` (else someone changed it since)
+  function applyNote(id, text, expect) {
     const card = cards[id];
-    if (!card) return;
+    const item = data.items.find((i) => i.id === id);
+    if (!card || !item) return false;
+    const current = id in unsynced ? unsynced[id] : item.note;
+    if (current.trim() !== expect.trim()) return "changed";
     const box = card.querySelector("textarea");
     box.value = text;
     unsynced[id] = text;
@@ -737,15 +833,9 @@
     grow(box);
     setStatus("保存中…");
     flush();
+    return true;
   }
 
-  function applyOrder(order) {
-    for (const [name, ids] of Object.entries(order)) {
-      if (!lists[name]) continue; // section gone since
-      for (const id of ids) if (cards[id]) lists[name].append(cards[id]);
-    }
-    commitOrder();
-  }
 
   // ---------- modes ----------
   function askPasscode() {
@@ -801,6 +891,7 @@
     const anchor = lastAnchor && Math.abs(scrollY - lastAnchor.y) < 2 ? lastAnchor.anchor : scrollAnchor();
     editing = on;
     document.body.classList.toggle("editing", on);
+    layout();
     modeBtn.textContent = on ? "完了" : "編集";
     modeBtn.setAttribute("aria-pressed", String(on));
     syncPlayback();
@@ -816,7 +907,7 @@
 
   // ---------- reorder ----------
   function moveBy(card, step) {
-    const before = domOrder();
+    const from = posOf(card);
     const list = card.parentElement;
     const names = data.sections;
     const i = names.indexOf(list.dataset.section);
@@ -836,14 +927,14 @@
       } else return;
     }
     card.scrollIntoView({ block: "nearest" });
-    commitOrder(before);
+    commitOrder(card, from);
   }
 
   function startDrag(card, y, e, pointer) {
     if (!editing || drag) return;
     e.preventDefault();
     document.activeElement?.blur();
-    drag = { card, pointer, y, before: JSON.stringify(domOrder()), raf: 0 };
+    drag = { card, pointer, y, before: JSON.stringify(domOrder()), from: posOf(card), raf: 0 };
     card.classList.add("dragging");
     document.body.classList.add("dragging");
     // listen on window: the card moves around the DOM while dragging
@@ -944,10 +1035,10 @@
     setDropTarget(undefined);
     drag.card.classList.remove("dragging");
     document.body.classList.remove("dragging");
-    const before = drag.before;
+    const before = drag.before, from = drag.from, moved = drag.card;
     const changed = JSON.stringify(domOrder()) !== before;
     drag = null;
-    if (changed) commitOrder(JSON.parse(before));
+    if (changed) commitOrder(moved, from);
     if (changed && target) setStatus(`「${target}」へ移動しました`, { fade: true });
   }
 
@@ -957,6 +1048,7 @@
     localStorage.setItem(CACHE_KEY, JSON.stringify(data));
     render();
     sheet?.redraw?.(); // e.g. the tag picker shows tags/choices made on other phones
+    if (off.have && neededMedia().some((u) => !off.have.has(cacheKey(u)))) syncOffline(); // new uploads: keep them offline too
   }
 
   const hasPending = () =>
@@ -971,7 +1063,29 @@
     const batch = { ...unsynced };
     const doneBatch = { ...unsyncedDone };
     const tagBatch = { ...unsyncedTags };
-    const sendOrder = orderDirty && !drag ? domOrder() : null;
+    let sendOrder = null;
+    const sentPending = pendingOrder;
+    if (pendingOrder && !drag) {
+      const server = Object.fromEntries(data.sections.map((n) => [n, data.items.filter((i) => i.section === n).map((i) => i.id)]));
+      const where = new Map(data.items.map((i) => [i.id, i.section]));
+      const moved = new Set(pendingOrder.moved);
+      sendOrder = {};
+      const touched = new Set(pendingOrder.touched || Object.keys(pendingOrder.order)); // only sections we changed
+      for (const [name, ids] of Object.entries(manualOrder())) {
+        if (!touched.has(name)) continue;
+        // a card another phone put in a different section since (and we didn't move) stays where they put it
+        const mine = ids.filter((id) => moved.has(id) || where.get(id) === name);
+        // ...and a card they moved INTO this section keeps a place (at the end) instead of a stale position
+        for (const id of server[name] || []) if (!mine.includes(id) && !moved.has(id)) mine.push(id);
+        if (JSON.stringify(mine) !== JSON.stringify(server[name] || [])) sendOrder[name] = mine;
+      }
+      if (!Object.keys(sendOrder).length) {
+        pendingOrder = null; // nothing differs from the server any more
+        orderDirty = false;
+        savePendingOrder();
+        sendOrder = null;
+      }
+    }
     if (!Object.keys(batch).length && !Object.keys(doneBatch).length && !Object.keys(tagBatch).length && !sendOrder) return;
     writeGen++;
     try {
@@ -1015,10 +1129,18 @@
       if (sendOrder) {
         try {
           await api("/api/order", { method: "PUT", body: { order: sendOrder } });
-          if (!drag && JSON.stringify(domOrder()) === JSON.stringify(sendOrder)) orderDirty = false;
+          if (!drag && pendingOrder === sentPending) {
+            pendingOrder = null; // moved again meanwhile? that newer order is sent next
+            orderDirty = false;
+            savePendingOrder();
+          }
         } catch (err) {
           if (err.auth || !err.status || err.status >= 500) throw err;
-          orderDirty = false; // e.g. a section was renamed meanwhile: don't retry forever
+          if (pendingOrder === sentPending) {
+            pendingOrder = null; // e.g. a section was renamed meanwhile: don't retry forever
+            orderDirty = false;
+            savePendingOrder();
+          }
           rejected = true;
         }
       }
@@ -1032,7 +1154,7 @@
       if (err.auth) {
         setStatus("パスコードが変わりました。編集でもう一度入力してください", { warn: true });
         if (editing) setEditing(false, { save: false }); // keep the edits; they are sent after re-entry
-        else if (Object.keys(unsyncedDone).length && !passDialog.open) askPasscode().then((ok) => ok && flush()); // 撮影済み from the main page
+        else if (hasPending() && !passDialog.open) askPasscode().then((ok) => ok && flush()); // changes made from the main page
       } else setStatus("オフライン・つながり次第保存します", { warn: true });
     }
   }
@@ -1043,21 +1165,28 @@
     return writing;
   }
 
+  let pulling = false, pullFails = 0, pulls = 0;
   async function pull() {
-    if (document.hidden || drag) return;
+    if (document.hidden || drag || pulling) return; // never stack requests on a weak signal
     if (hasPending() && localStorage.getItem(PASS_KEY)) return flush(); // retry failed writes first
     const gen = writeGen;
+    pulling = true;
     try {
-      const remote = await api("/api/data");
+      const remote = await api("/api/data", { timeout: 10000 });
+      pullFails = 0;
       // pending notes/撮影済み are layered over the server data by render(), so other phones' changes still show
-      if (gen === writeGen && !orderDirty && !drag) show(remote);
+      if (gen === writeGen && !drag && JSON.stringify(remote) !== localStorage.getItem(CACHE_KEY)) show(remote);
       if (statusEl.classList.contains("warn") && !hasPending()) setStatus("");
+      if (++pulls % 4 === 0) checkVersion(); // piggyback, so the radio can rest between polls
     } catch {
+      if (++pullFails < 2 && data.items.length) return; // one slow answer isn't worth a warning
       setStatus("オフライン・最新の内容を読み込めません", { warn: true });
       if (!data.items.length) {
         emptyEl.querySelector(".msg").textContent = "読み込めませんでした。電波の良い場所でもう一度お試しください。";
         emptyEl.querySelector(".retry").hidden = false;
       }
+    } finally {
+      pulling = false;
     }
   }
 
@@ -1275,11 +1404,18 @@
         return reloadToNew();
       }
       updateBar.hidden = false;
+      document.documentElement.style.setProperty("--update-h", `${updateBar.offsetHeight}px`);
     } catch {} // offline: try again later
   }
   async function reloadToNew() {
+    if (editing || drag) return setStatus("編集を終えてから更新してください", { warn: true });
     updateBar.querySelector("button").disabled = true;
     await flush().catch(() => {});
+    if (hasPending()) {
+      // everything unsaved is kept on the phone anyway, but don't risk it: update once it's saved
+      updateBar.querySelector("button").disabled = false;
+      return setStatus("未保存の変更があります。電波のある所で保存されてから更新してください", { warn: true });
+    }
     // a new URL, so Safari can't hand back the cached old page
     location.replace(`${location.pathname}?v=${encodeURIComponent(newVersion || Date.now())}`);
   }
@@ -1287,12 +1423,182 @@
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) checkVersion({ resumed: true });
   });
-  setInterval(() => !document.hidden && checkVersion(), 60000);
+
   checkVersion({ resumed: true });
+
+  // ---------- offline: keep every clip/photo on the phone (service worker in sw.js) ----------
+  const MEDIA_CACHE = "maedori-media"; // same name as in sw.js
+  const offlineBtn = document.getElementById("offline");
+  const MAX_OFFLINE_BYTES = 60 * 1024 * 1024; // bigger uploads stream only (slicing them in the SW is too heavy for iOS)
+  const off = {
+    supported: "serviceWorker" in navigator && "caches" in window,
+    have: null, need: [], tooBig: new Set(), syncing: false, again: false, failed: 0, done: 0, total: 0,
+    shellOk: false, persisted: null,
+  };
+  const absUrl = (key) => new URL(mediaUrl(key), location.href);
+  const cacheKey = (url) => (url.origin === location.origin ? url.origin + url.pathname : url.href); // as in sw.js
+  const neededMedia = () => [...new Set(data.items.flatMap((i) => [i.media, i.poster]).filter(Boolean))].map(absUrl);
+  const missingMedia = () => off.need.filter((u) => !off.have.has(cacheKey(u)) && !off.tooBig.has(cacheKey(u)));
+
+  // this version's service worker is in charge and its app files are saved
+  const swOurs = () => {
+    const c = navigator.serviceWorker?.controller;
+    return !!c && new URL(c.scriptURL).searchParams.get("v") === ASSET_V;
+  };
+  const offlineReady = () => !!off.have && missingMedia().length === 0 && swOurs() && off.shellOk;
+
+  function showOffline() {
+    let text, cls;
+    const missing = off.have ? missingMedia().length : null;
+    const ours = swOurs();
+    if (!off.supported) [text, cls] = ["オフライン非対応", "warn"];
+    else if (!data.items.length) [text, cls] = navigator.onLine ? ["確認中", "busy"] : ["未保存", "warn"];
+    else if (off.syncing) [text, cls] = [`${off.done}/${off.total}`, "busy"];
+    else if (missing === 0 && ours && off.shellOk) [text, cls] = off.tooBig.size ? ["一部オンライン", "part"] : ["オフライン", "ok"];
+    else if (missing === null || !ours) [text, cls] = ["確認中", "busy"];
+    else [text, cls] = [`未保存 ${missing || 1}`, "warn"];
+    offlineBtn.textContent = text;
+    offlineBtn.className = cls;
+    offlineBtn.hidden = false;
+    offlineBtn.setAttribute("aria-label", cls === "ok" ? "オフラインでも使えます" : cls === "busy" ? `オフライン用に保存中 ${text}` : `オフライン: ${text}`);
+  }
+
+  async function syncOffline({ revalidate = false } = {}) {
+    if (!off.supported || !data.items.length) return showOffline();
+    if (off.syncing) return void (off.again = true);
+    off.syncing = true;
+    try {
+      const cache = await caches.open(MEDIA_CACHE);
+      off.have = new Set((await cache.keys()).map((r) => r.url)); // re-read: iOS may have evicted things while suspended
+      off.shellOk = !!((await caches.match(`app.js?v=${ASSET_V}`)) && (await caches.match(`style.css?v=${ASSET_V}`)) && (await caches.match("./")));
+      off.need = neededMedia();
+      const wanted = new Set(off.need.map(cacheKey));
+      for (const key of off.have) if (!wanted.has(key)) {
+        await cache.delete(key); // deleted items: free the space
+        off.have.delete(key);
+      }
+      // after a deploy, ask the server whether any repo clip was re-cut (cheap 304s via ETag)
+      if (revalidate || localStorage.getItem("maedori:mediaV") !== MEDIA_V) {
+        let answered = true;
+        for (const url of off.need) {
+          if (url.origin !== location.origin || !off.have.has(cacheKey(url))) continue;
+          const old = await cache.match(cacheKey(url));
+          const etag = old?.headers.get("etag");
+          const check = new URL(url);
+          check.searchParams.set("swbypass", "1"); // past the SW's cache, to the server
+          try {
+            const res = await fetch(check, { cache: "no-store", headers: etag ? { "if-none-match": etag } : {} });
+            if (res.status === 200) await cache.put(cacheKey(url), res);
+            else if (res.status !== 304) answered = false;
+          } catch {
+            answered = false;
+            break; // no connection: try again later
+          }
+        }
+        if (answered) localStorage.setItem("maedori:mediaV", MEDIA_V);
+      }
+      const todo = missingMedia();
+      off.total = todo.length;
+      off.done = 0;
+      off.failed = 0;
+      if (todo.length) {
+        showOffline();
+        let next = 0;
+        const worker = async () => {
+          while (next < todo.length) {
+            const url = todo[next++];
+            try {
+              const res = await fetch(url, { cache: "no-store" }); // whole file (no Range), straight from the network
+              if (res.status !== 200) throw new Error(res.status);
+              if (Number(res.headers.get("content-length") || 0) > MAX_OFFLINE_BYTES) {
+                off.tooBig.add(cacheKey(url));
+                res.body?.cancel();
+                const key = data.items.flatMap((i) => [i.media, i.poster]).find((k) => k && cacheKey(absUrl(k)) === cacheKey(url));
+                if (key && !streamOnly.has(key)) {
+                  streamOnly.add(key);
+                  localStorage.setItem(STREAM_ONLY_KEY, JSON.stringify([...streamOnly]));
+                  for (const card of Object.values(cards)) {
+                    const v = card.querySelector("video");
+                    if (v && v.src === url.href) v.src = mediaUrl(key); // from now on straight from the network
+                  }
+                }
+              } else {
+                await cache.put(cacheKey(url), res);
+                off.have.add(cacheKey(url));
+                off.done++;
+              }
+            } catch {
+              off.failed++;
+            }
+            showOffline();
+          }
+        };
+        await Promise.all([worker(), worker(), worker()]); // 3 at a time
+      }
+    } catch {
+      // e.g. storage full: the badge shows what's missing
+    } finally {
+      off.syncing = false;
+      showOffline();
+      if (off.again) {
+        off.again = false;
+        syncOffline();
+      }
+    }
+  }
+
+  async function startOffline() {
+    showOffline();
+    if (!off.supported) return;
+    try {
+      await navigator.serviceWorker.register(`sw.js?v=${ASSET_V}`, { scope: "./", updateViaCache: "none" });
+      navigator.storage?.persist?.().then((ok) => (off.persisted = ok)).catch(() => {}); // ask Safari not to evict the saved clips
+    } catch {}
+    navigator.serviceWorker.addEventListener("controllerchange", showOffline);
+    await navigator.serviceWorker.ready;
+    syncOffline();
+  }
+  addEventListener("online", () => syncOffline());
+  document.addEventListener("visibilitychange", () => !document.hidden && off.have && syncOffline());
+  addEventListener("offline", showOffline);
+
+  offlineBtn.addEventListener("click", async () => {
+    const need = off.need.length || neededMedia().length;
+    const missing = off.have ? missingMedia().length : need;
+    let usage = "";
+    try {
+      const est = await navigator.storage.estimate();
+      if (est.usage) usage = `（約${Math.max(1, Math.round(est.usage / 1048576))}MB）`;
+    } catch {}
+    const body = document.createElement("div");
+    body.className = "offline-info";
+    const lines = [
+      offlineReady()
+        ? `電波がなくても、${off.tooBig.size ? "大きい動画以外の" : "すべての"}写真・動画（${need - off.tooBig.size}件）${usage}をこの端末で見られます。`
+        : !swOurs() || !off.shellOk
+          ? "新しいバージョンの準備中です。電波のある所で、しばらくこの画面を開いておいてください。"
+          : `この端末に保存済み：${need - missing - off.tooBig.size}/${need}件${usage}。${navigator.onLine ? "保存を続けています。" : "電波のある場所で開くと保存されます。"}`,
+      navigator.onLine ? "いまは電波があります。" : "いまはオフラインです。メモや撮影済みの変更は、つながった時に保存されます。",
+    ];
+    if (off.failed) lines.push(`${off.failed}件の保存に失敗しました。電波の良い場所で「もう一度確認する」を押してください。`);
+    if (off.tooBig.size) lines.push(`大きい動画${off.tooBig.size}件は、電波がある時だけ再生できます。`);
+    if (off.persisted === false) lines.push("※ 長い間開かないと、iPhoneが保存データを消すことがあります。撮影の前に一度開いてください。");
+    for (const t of lines) {
+      const p = document.createElement("p");
+      p.textContent = t;
+      body.append(p);
+    }
+    openSheet({
+      title: "オフライン",
+      body,
+      close: "閉じる",
+      actions: [{ label: "もう一度確認する", run: () => syncOffline({ revalidate: true }) }],
+    });
+  });
 
   // ---------- start ----------
   render();
-  pull();
+  pull().finally(startOffline);
   setInterval(pull, POLL_MS);
   document.addEventListener("visibilitychange", pull);
 })();
